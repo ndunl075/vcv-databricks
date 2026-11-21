@@ -1,0 +1,7 @@
+target/
+*.parquet
+/data/
+/out/
+/scratch/
+.DS_Store
+__pycache__/
