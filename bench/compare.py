@@ -90,6 +90,11 @@ def compare_table(con, table, actual_dir, expected_root):
     files = parquet_files(os.path.join(actual_dir, table))
     check_schema(files, cols)
     load(con, f"a_{table}", "parquet", files, table)
+    if expected_root == "-":  # no expected tables yet: schema check and digest only
+        allc = ", ".join(f'"{c}"' for c in cols)
+        n_a = con.execute(f"SELECT count(*) FROM a_{table}").fetchone()[0]
+        digest = con.execute(f"SELECT coalesce(sum(CAST(hash({allc}) AS HUGEINT)), 0) FROM a_{table}").fetchone()[0]
+        return {"rows": n_a, "expected_rows": None, "missing": 0, "extra": 0, "differing": 0, "digest": str(digest)}
     exp_csv = os.path.join(expected_root, f"{table}.csv")
     if os.path.isfile(exp_csv):
         load(con, f"e_{table}", "csv", exp_csv, table)
@@ -106,8 +111,10 @@ def compare_table(con, table, actual_dir, expected_root):
     missing = con.execute(f"SELECT count(*) FROM e_{table} e ANTI JOIN a1_{table} a ON {on}").fetchone()[0]
     extra_new = con.execute(f"SELECT count(*) FROM a1_{table} a ANTI JOIN e_{table} e ON {on}").fetchone()[0]
     differing = con.execute(f"SELECT count(*) FROM a1_{table} a JOIN e_{table} e ON {on} WHERE {diff}").fetchone()[0]
+    allc = ", ".join(f'"{c}"' for c in cols)
+    digest = con.execute(f"SELECT coalesce(sum(CAST(hash({allc}) AS HUGEINT)), 0) FROM a_{table}").fetchone()[0]
     return {"rows": n_a, "expected_rows": n_e, "missing": missing, "extra": extra_new + (n_a - n_a_keys),
-            "differing": differing}
+            "differing": differing, "digest": str(digest)}
 
 
 def main():
@@ -122,7 +129,9 @@ def main():
             result["tables"][table] = r
             for k in ("missing", "extra", "differing"):
                 result[k] += r[k]
-        result["ok"] = result["missing"] == result["extra"] == result["differing"] == 0
+        result["ok"] = (result["missing"] == result["extra"] == result["differing"] == 0) and expected != "-"
+        result["no_expected"] = expected == "-"
+        result["digest"] = "-".join(result["tables"][t]["digest"] for t in SCHEMAS)
     except (ValueError, duckdb.Error, OSError, pa.ArrowException) as e:
         result["error"] = f"{type(e).__name__}: {e}"[:300]
     text = ("MATCH" if result["ok"] else "DIFFER") + f" missing={result['missing']} extra={result['extra']} " \
