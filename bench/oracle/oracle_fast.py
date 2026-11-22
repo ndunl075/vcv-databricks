@@ -2,6 +2,7 @@
 functions as oracle_py (rules.py), DuckDB does the set logic in SQL, one statement per rule, in rule order.
 Cross-checked against oracle_py on the fixtures, dev and every small variant (bench/oracle/selfcheck.sh)."""
 import multiprocessing as mp
+import time
 import os
 import shutil
 import sys
@@ -79,6 +80,8 @@ def stage_clicks(args):
 
 
 def run(data, out, work=None):
+    t0 = time.time()
+    log = lambda m: print('[oracle-fast %6.1fs] %s' % (time.time() - t0, m), file=sys.stderr, flush=True)
     ws, we = read_manifest(data)
     work = work or os.path.join(out, "_work")
     shutil.rmtree(work, ignore_errors=True)
@@ -91,17 +94,21 @@ def run(data, out, work=None):
         jobs_c.sort(key=lambda j: -os.path.getsize(j[0]))
         ev_files = pool.map(stage_events, jobs_e, chunksize=1)
         ck_files = pool.map(stage_clicks, jobs_c, chunksize=1)
+    log('staged csv -> parquet')
     names = person_names(data)
-    pq.write_table(pa.table({"id": list(names.keys()), "name": list(names.values())}), os.path.join(work, "persons.parquet"))
+    log('persons')
+    S = pa.string()
+    pq.write_table(pa.table({"id": pa.array(list(names.keys()), S), "name": pa.array(list(names.values()), S)}),
+                   os.path.join(work, "persons.parquet"))
     products = read_small_table(os.path.join(data, "products.csv"))
     campaigns = read_small_table(os.path.join(data, "campaigns.csv"))
-    pq.write_table(pa.table({"product_id": list(products), "category": list(products.values())}),
+    pq.write_table(pa.table({"product_id": pa.array(list(products), S), "category": pa.array(list(products.values()), S)}),
                    os.path.join(work, "products.parquet"))
-    pq.write_table(pa.table({"campaign_id": list(campaigns), "channel": list(campaigns.values())}),
+    pq.write_table(pa.table({"campaign_id": pa.array(list(campaigns), S), "channel": pa.array(list(campaigns.values()), S)}),
                    os.path.join(work, "campaigns.parquet"))
 
-    con = duckdb.connect(os.path.join(work, "oracle.duckdb"))
-    con.execute(f"SET temp_directory='{work}/spill'; SET preserve_insertion_order=false;")
+    con = duckdb.connect()
+    con.execute(f"SET temp_directory='{work}/spill'; SET preserve_insertion_order=false; SET memory_limit='13GB';")
     lst = lambda fs: "[" + ", ".join("'" + f.replace("'", "''") + "'" for f in fs) + "]"
     con.execute(f"CREATE VIEW raw_events AS SELECT * FROM read_parquet({lst(ev_files)})")
     con.execute(f"CREATE VIEW raw_clicks AS SELECT * FROM read_parquet({lst(ck_files)})")
@@ -126,7 +133,7 @@ def run(data, out, work=None):
     DROP TABLE ev_kept;
     -- Events 5: sessionize per person; a new session when the gap to the previous event is over 30 min
     CREATE TABLE ev_s AS
-      SELECT *, sum(brk) OVER (PARTITION BY person ORDER BY ts ROWS UNBOUNDED PRECEDING) AS sid
+      SELECT *, sum(brk) OVER (PARTITION BY person ORDER BY ts RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS sid
       FROM (SELECT *, CASE WHEN lag(ts) OVER w IS NULL OR ts - lag(ts) OVER w > 1800000 THEN 1 ELSE 0 END AS brk
             FROM ev WINDOW w AS (PARTITION BY person ORDER BY ts));
     DROP TABLE ev;
@@ -167,19 +174,23 @@ def run(data, out, work=None):
         FROM sessions s JOIN ck_distinct c ON c.person = s.person AND c.ts <= s.start_ts AND c.ts >= s.start_ts - 604800000)
       GROUP BY day, campaign_id;
     """
-    con.execute(sql)
+    for stmt in [x for x in sql.split(';\n') if x.strip()]:
+        con.execute(stmt)
+        log(' '.join(stmt.split())[:60])
 
     os.makedirs(os.path.join(out, "user_daily"), exist_ok=True)
     os.makedirs(os.path.join(out, "campaign_daily"), exist_ok=True)
     con.execute(f"""COPY (
-      SELECT s.person AS user_id, s.day, count(*) AS sessions, sum(s.events) AS events, sum(s.revenue) AS revenue_cents,
-             t.category AS top_category
+      SELECT CAST(s.person AS VARCHAR) AS user_id, s.day, CAST(count(*) AS BIGINT) AS sessions,
+             CAST(sum(s.events) AS BIGINT) AS events, CAST(sum(s.revenue) AS BIGINT) AS revenue_cents,
+             CAST(t.category AS VARCHAR) AS top_category
       FROM sessions s LEFT JOIN top_cat t ON t.person = s.person AND t.day = s.day
       GROUP BY s.person, s.day, t.category) TO '{out}/user_daily/part.parquet' (FORMAT parquet)""")
     con.execute(f"""COPY (
-      SELECT a.campaign_id, CASE WHEN a.campaign_id = 'organic' THEN 'organic' ELSE c.channel END AS channel, a.day,
-             sum(a.sessions) AS sessions, sum(a.purchasing_sessions) AS purchasing_sessions,
-             sum(a.revenue_cents) AS revenue_cents, sum(a.assisted_sessions) AS assisted_sessions
+      SELECT CAST(a.campaign_id AS VARCHAR) AS campaign_id,
+             CAST(CASE WHEN a.campaign_id = 'organic' THEN 'organic' ELSE c.channel END AS VARCHAR) AS channel, a.day,
+             CAST(sum(a.sessions) AS BIGINT) AS sessions, CAST(sum(a.purchasing_sessions) AS BIGINT) AS purchasing_sessions,
+             CAST(sum(a.revenue_cents) AS BIGINT) AS revenue_cents, CAST(sum(a.assisted_sessions) AS BIGINT) AS assisted_sessions
       FROM (SELECT campaign_id, day, count(*) AS sessions, count(*) FILTER (WHERE purchasing) AS purchasing_sessions,
                    sum(revenue) AS revenue_cents, 0 AS assisted_sessions FROM credited GROUP BY campaign_id, day
             UNION ALL
