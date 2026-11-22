@@ -74,3 +74,25 @@ Tried, no gain (branches kept on the test repo):
   1-5% slower everywhere: the record writes and 8 more bytes per event cost more than the reads.
 - core-sort: radix on person bits only, then insertion sort per person by time. Neutral to 3%
   slower; the 4-pass radix on ~80 KB shards runs from L2 and beats unsorted insertion sorts.
+
+## Prefetch in dedup, narrower sort digits (2026-11-22, branch core-speed, from core-tagbins)
+
+Measured on GitHub x86 runners (2 vCPU, private repo `gavinvaughan1/ss-bench`, workflow `bench.yml`:
+two branches built side by side, dev answer + 51 fixtures + 20M v5 table equality, then 7-9
+alternated timed runs of the binary with NCPU=4 on a 20M v5 set). Same build against itself:
+B/A 0.993, so about 1% is noise.
+
+- **Dedup reads two lines per suspect row** (`dedup.rs`): event_id, user_id, ts and ingest_ts
+  often run past the row's first cache line, so the second line is prefetched too.
+  Xeon 6975P: dedup stage 0.38 -> 0.29 s, total B/A 0.978.
+- **Dedup loads the person entry ahead** (`settle` takes a `warm` hook, `Deal::warm`): the
+  record 16 ahead and its `lead` entry 8 ahead, in both keep loops. EPYC 9V74: B/A 0.985.
+- **Shard sort digits** (`sessions.rs` `sorted`): same pass count as 11-bit digits, digits as
+  narrow as that allows (40-bit keys at 20M: four 10-bit digits, 4 KB count tables instead of
+  8 KB). Xeon 6975P: B/A 0.986, faster in 7 of 7 runs.
+- **All three vs core-tagbins:** EPYC 9V74 B/A 0.981 and 0.983 (two runners, 9 runs each).
+- **Tried, no gain:** twice the event-id cells (no halving in `Cells::new`): suspects -18% at
+  5M, but EPYC 7763 B/A 1.009; dedup time did not fall and mark/sweep got slower.
+- x86 perf profile of core-tagbins (EPYC, 20M): read_fast 49%, dedup 11%, sweep 8%, shard sort
+  7.4%, person loop 7.3%, people join 1.9%, kernel page zeroing 1.8%, parquet 1.7%. Hottest lines:
+  input word loads 4.1%, dedup field scan 3.4% (row misses), user table cell load 3.2%.
