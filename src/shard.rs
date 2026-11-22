@@ -193,12 +193,19 @@ unsafe fn send_line(to: *mut u8, line: &Line) {
     std::ptr::copy_nonoverlapping(line.0.as_ptr() as *const u8, to, 64);
 }
 
+/// Bits needed to hold any value below `span` (at least one).
+pub fn bits_for(span: i64) -> u32 {
+    (64 - (span.max(2) as u64 - 1).leading_zeros()).max(1)
+}
+
 /// Deals the valid, surviving events of `runs`. A dealt event is
-/// `[key, person-in-shard | category << 32]`. Returns the rows per shard.
+/// `[person-in-shard << time_bits | milliseconds after the window start, price | category << 32]`,
+/// so ordering a shard's rows by the first word groups them by person, in time order.
+/// Returns the rows per shard.
 ///
 /// # Safety
 /// `out` must have room at every `at[shard]` for the rows this thread tallied there.
-pub unsafe fn deal_events(runs: &[&Run<Ev>], seats: &Seating, d: &mut Dealer, out: *mut Row, at: &[usize]) -> Vec<u32> {
+pub unsafe fn deal_events(runs: &[&Run<Ev>], seats: &Seating, time_bits: u32, d: &mut Dealer, out: *mut Row, at: &[usize]) -> Vec<u32> {
     d.start(at);
     let shift = seats.local_bits;
     let low = (1u32 << shift) - 1;
@@ -206,26 +213,29 @@ pub unsafe fn deal_events(runs: &[&Run<Ev>], seats: &Seating, d: &mut Dealer, ou
         for i in 0..run.n {
             let r = &*run.first.add(i);
             if r.who != NOBODY {
-                d.put(out, (r.who >> shift) as usize, [r.key, (r.who & low) as u64 | (r.cat as u64) << 32]);
+                let person = (r.who & low) as u64;
+                d.put(out, (r.who >> shift) as usize, [person << time_bits | r.key >> 24, (r.key & 0xff_ffff) | (r.cat as u64) << 32]);
             }
         }
     }
     d.finish(out, at)
 }
 
-/// Deals clicks. A dealt click is `[when << 24 | person-in-shard, campaign | number << 32]`,
+/// Deals clicks. A dealt click is
+/// `[person-in-shard << time_bits | milliseconds after the click window start, campaign | number << 32]`,
 /// where `number` is the click's place in the list of all click records.
 ///
 /// # Safety
 /// As `deal_events`.
-pub unsafe fn deal_clicks(runs: &[(&Run<Ck>, u32)], seats: &Seating, d: &mut Dealer, out: *mut Row, at: &[usize]) -> Vec<u32> {
+pub unsafe fn deal_clicks(runs: &[(&Run<Ck>, u32)], seats: &Seating, time_bits: u32, d: &mut Dealer, out: *mut Row, at: &[usize]) -> Vec<u32> {
     d.start(at);
     let shift = seats.local_bits;
     let low = (1u32 << shift) - 1;
     for (run, first) in runs {
         for i in 0..run.n {
             let r = &*run.first.add(i);
-            d.put(out, (r.who >> shift) as usize, [r.when << 24 | (r.who & low) as u64, r.camp as u64 | ((*first as u64 + i as u64) << 32)]);
+            let person = (r.who & low) as u64;
+            d.put(out, (r.who >> shift) as usize, [person << time_bits | r.when, r.camp as u64 | ((*first as u64 + i as u64) << 32)]);
         }
     }
     d.finish(out, at)

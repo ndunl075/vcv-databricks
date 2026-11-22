@@ -85,28 +85,34 @@ pub fn spread(k: &Key) -> u64 {
     fold(x ^ k[2] ^ 0x1656_67b1_9e37_79f9, 0xd6e8_feb8_6659_fd93)
 }
 
-/// Where an ID's bytes live, and its first eight bytes in comparison order.
+/// An ID's text: its first 16 bytes (zero padded) kept here, and where all of it lives.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Text {
-    pub head: u64,
     pub at: *const u8,
     pub len: u32,
+    pub first: [u8; 16],
 }
 
 impl Text {
     #[inline]
-    pub fn bytes(&self) -> &'static [u8] {
-        // SAFETY: `at..at+len` lies in an input mapping that is never unmapped.
-        unsafe { std::slice::from_raw_parts(self.at, self.len as usize) }
+    pub fn bytes(&self) -> &[u8] {
+        if self.len <= 16 {
+            &self.first[..self.len as usize]
+        } else {
+            // SAFETY: `at..at+len` lies in an input mapping that is never unmapped.
+            unsafe { std::slice::from_raw_parts(self.at, self.len as usize) }
+        }
     }
     /// Byte-wise order of two IDs.
     #[inline]
     pub fn before(&self, other: &Text) -> bool {
-        if self.head != other.head {
-            self.head < other.head
+        let (a, b) = (u128::from_be_bytes(self.first), u128::from_be_bytes(other.first));
+        if a != b {
+            a < b
         } else {
-            self.bytes() < other.bytes()
+            // SAFETY: as in `bytes`.
+            unsafe { std::slice::from_raw_parts(self.at, self.len as usize) < std::slice::from_raw_parts(other.at, other.len as usize) }
         }
     }
 }
@@ -297,7 +303,7 @@ impl Table {
                     s.fresh += 1;
                     let key_at = std::ptr::addr_of_mut!((*c).key);
                     key_at.write(*k);
-                    names.text(id).write(Text { head: head_of(at, len), at, len: len as u32 });
+                    names.text(id).write(Text { at, len: len as u32, first: first_of(k, at) });
                     (*c).state.store(id as u64 + 2, Release);
                     return id;
                 }
@@ -314,10 +320,17 @@ unsafe fn same_long(names: &Names, id: u32, at: *const u8, len: usize) -> bool {
     (*names.text(id)).bytes() == std::slice::from_raw_parts(at, len)
 }
 
-/// First eight bytes, zero padded, as a number that orders like the bytes do.
+/// The first 16 bytes of an ID, zero padded.
 #[inline(always)]
-unsafe fn head_of(at: *const u8, len: usize) -> u64 {
-    (word(at) & LOW_BYTES[len.min(8)]).swap_bytes()
+unsafe fn first_of(k: &Key, at: *const u8) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    if is_long(k) {
+        std::ptr::copy_nonoverlapping(at, out.as_mut_ptr(), 16);
+    } else {
+        out[..8].copy_from_slice(&k[0].to_le_bytes());
+        out[8..].copy_from_slice(&k[1].to_le_bytes());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -402,15 +415,16 @@ mod tests {
     }
 
     #[test]
-    fn head_orders_like_bytes() {
-        let items: Vec<&[u8]> = vec![b"U9", b"u1", b"u10", b"u2", b"u", b"u\0", b"abcdefgh", b"abcdefgha", b"abcdefgh\0"];
+    fn text_orders_like_bytes() {
+        let items: Vec<&[u8]> = vec![b"U9", b"u1", b"u10", b"u2", b"u", b"u\0", b"abcdefgh", b"abcdefgha", b"abcdefgh\0", b"0123456789abcdef", b"0123456789abcdefg", b"0123456789abcdef\0", b"0123456789abcdefghijklmnopqrstuvwxyz", b"0123456789abcdefghijklmnopqrstuvwxyy"];
         for a in &items {
             for b in &items {
                 let (pa, pb) = (padded(a), padded(b));
-                let ta = Text { head: unsafe { head_of(pa.as_ptr(), a.len()) }, at: pa.as_ptr(), len: a.len() as u32 };
-                let tb = Text { head: unsafe { head_of(pb.as_ptr(), b.len()) }, at: pb.as_ptr(), len: b.len() as u32 };
-                let lt = if ta.head != tb.head { ta.head < tb.head } else { &pa[..a.len()] < &pb[..b.len()] };
-                assert_eq!(lt, a < b, "{a:?} {b:?}");
+                let (ka, kb) = unsafe { (key_of(pa.as_ptr(), a.len()), key_of(pb.as_ptr(), b.len())) };
+                let ta = Text { at: pa.as_ptr(), len: a.len() as u32, first: unsafe { first_of(&ka, pa.as_ptr()) } };
+                let tb = Text { at: pb.as_ptr(), len: b.len() as u32, first: unsafe { first_of(&kb, pb.as_ptr()) } };
+                assert_eq!(ta.before(&tb), a < b, "{a:?} {b:?}");
+                assert_eq!(ta.bytes(), *a);
             }
         }
     }

@@ -3,6 +3,7 @@
 
 use crate::acc::CampAcc;
 use crate::ids::Names;
+use crate::os;
 use crate::parquet::{MaybeTextColumn, TextColumn};
 use crate::parse::{Ck, Run};
 use crate::people::People;
@@ -53,6 +54,9 @@ pub struct Stage<'a> {
     pub seats: &'a Seating,
     pub events: Dealt<'a>,
     pub clicks: Dealt<'a>,
+    /// Low bits of a dealt row's first word that hold its time.
+    pub event_time_bits: u32,
+    pub click_time_bits: u32,
     /// All click runs with the number of each run's first record, ascending.
     pub click_runs: &'a [(Run<Ck>, u32)],
 }
@@ -73,11 +77,11 @@ impl Stage<'_> {
 /// Working memory of one worker.
 #[derive(Default)]
 pub struct Bench {
-    ev_end: Vec<u32>,
-    ck_end: Vec<u32>,
-    evs: Vec<Row>,
-    cks: Vec<Row>,
-    spare: Vec<Row>,
+    ev: [Vec<Row>; 2],
+    ck: [Vec<Row>; 2],
+    counts: Vec<u32>,
+    /// (person-in-shard, first event, one past the last event) for every person of the shard.
+    spans: Vec<(u32, u32, u32)>,
     starts: Vec<i64>,
     days: Vec<i32>,
     revs: Vec<u64>,
@@ -88,99 +92,91 @@ pub struct Bench {
     day_of: Vec<i32>,
 }
 
-/// Places `parts` into `out` grouped by `local(row)`; afterwards `end[l]` is one past the last
-/// row of person `l`.
-fn group(parts: impl Iterator<Item = impl AsRef<[Row]>> + Clone, people: usize, local: impl Fn(&Row) -> usize, end: &mut Vec<u32>, out: &mut Vec<Row>) {
-    end.clear();
-    end.resize(people + 1, 0);
-    let mut total = 0usize;
+const DIGIT: u32 = 11;
+const BUCKETS: usize = 1 << DIGIT;
+
+/// Sorts the rows of `parts` by the low `bits` bits of their first word (the higher bits must be
+/// equal). The sorted rows end up in `bufs[i]` for the returned `i`.
+fn sorted(parts: impl Iterator<Item = impl AsRef<[Row]>> + Clone, bits: u32, bufs: &mut [Vec<Row>; 2], counts: &mut Vec<u32>) -> usize {
+    let total: usize = parts.clone().map(|p| p.as_ref().len()).sum();
+    for b in bufs.iter_mut() {
+        b.clear();
+        b.reserve(total);
+    }
+    if total < 192 {
+        for p in parts {
+            bufs[0].extend_from_slice(p.as_ref());
+        }
+        bufs[0].sort_unstable_by_key(|r| r[0]);
+        return 0;
+    }
+    let passes = bits.div_ceil(DIGIT).max(1) as usize;
+    counts.clear();
+    counts.resize(passes * BUCKETS, 0);
     for part in parts.clone() {
         for r in part.as_ref() {
-            end[local(r) + 1] += 1;
-        }
-        total += part.as_ref().len();
-    }
-    let mut run = 0u32;
-    for e in end.iter_mut() {
-        run += *e;
-        *e = run;
-    }
-    out.clear();
-    out.reserve(total);
-    let base = out.as_mut_ptr();
-    for part in parts {
-        for r in part.as_ref() {
-            let slot = &mut end[local(r)];
-            // SAFETY: slots are distinct and below `total`; every slot is written once.
-            unsafe { base.add(*slot as usize).write(*r) };
-            *slot += 1;
-        }
-    }
-    // SAFETY: all `total` slots were written.
-    unsafe { out.set_len(total) };
-}
-
-/// Orders rows by their first word.
-fn by_first_word(rows: &mut [Row], spare: &mut Vec<Row>) {
-    let n = rows.len();
-    if n <= 24 {
-        for i in 1..n {
-            let x = rows[i];
-            let mut j = i;
-            while j > 0 && rows[j - 1][0] > x[0] {
-                rows[j] = rows[j - 1];
-                j -= 1;
+            let mut w = r[0];
+            for p in 0..passes {
+                // SAFETY: the index is below passes * BUCKETS.
+                unsafe { *counts.get_unchecked_mut(p * BUCKETS + (w as usize & (BUCKETS - 1))) += 1 };
+                w >>= DIGIT;
             }
-            rows[j] = x;
         }
-    } else if n < 4096 {
-        rows.sort_unstable_by_key(|r| r[0]);
-    } else {
-        by_digits(rows, spare);
     }
-}
-
-/// Stable sort by the first word, 11 bits per pass, skipping the bits no row differs in.
-fn by_digits(rows: &mut [Row], spare: &mut Vec<Row>) {
-    let (mut all_or, mut all_and) = (0u64, !0u64);
-    for r in rows.iter() {
-        all_or |= r[0];
-        all_and &= r[0];
+    // SAFETY: both buffers have room for `total` rows; every pass writes each slot exactly once
+    // before the next pass (or the caller) reads it.
+    unsafe {
+        bufs[0].set_len(total);
+        bufs[1].set_len(total);
     }
-    let varying = all_or ^ all_and;
-    if varying == 0 {
-        return;
-    }
-    let low = varying.trailing_zeros();
-    let span = 64 - varying.leading_zeros() - low;
-    let passes = span.div_ceil(11);
-    spare.clear();
-    spare.resize(rows.len(), [0; 2]);
-    let mut count = vec![0u32; 2048];
-    let mut in_rows = true;
+    let mut from_parts = true;
+    let mut cur = 1usize; // rows are in bufs[cur] once `from_parts` is false
     for p in 0..passes {
-        let shift = low + p * 11;
-        count.iter_mut().for_each(|c| *c = 0);
-        let (src, dst): (&[Row], &mut [Row]) = if in_rows { (&*rows, &mut spare[..]) } else { (&spare[..], &mut *rows) };
-        for r in src {
-            count[((r[0] >> shift) & 2047) as usize] += 1;
+        let c = &mut counts[p * BUCKETS..(p + 1) * BUCKETS];
+        if c.iter().any(|&n| n as usize == total) {
+            continue; // every row has the same digit here
         }
         let mut run = 0u32;
-        for c in count.iter_mut() {
-            let n = *c;
-            *c = run;
+        for x in c.iter_mut() {
+            let n = *x;
+            *x = run;
             run += n;
         }
-        for r in src {
-            let c = &mut count[((r[0] >> shift) & 2047) as usize];
-            dst[*c as usize] = *r;
-            *c += 1;
+        let shift = p as u32 * DIGIT;
+        let dst = 1 - cur;
+        let out = bufs[dst].as_mut_ptr();
+        let mut place = |r: &Row| {
+            // SAFETY: counts place every row at a distinct index below `total`.
+            unsafe {
+                let slot = c.get_unchecked_mut((r[0] >> shift) as usize & (BUCKETS - 1));
+                out.add(*slot as usize).write(*r);
+                *slot += 1;
+            }
+        };
+        if from_parts {
+            for part in parts.clone() {
+                part.as_ref().iter().for_each(&mut place);
+            }
+            from_parts = false;
+        } else {
+            let (src_ptr, n) = (bufs[cur].as_ptr(), total);
+            for i in 0..n {
+                // SAFETY: `i < total`, and source and destination are different buffers.
+                place(unsafe { &*src_ptr.add(i) });
+            }
         }
-        in_rows = !in_rows;
+        cur = dst;
     }
-    if !in_rows {
-        rows.copy_from_slice(spare);
+    if from_parts {
+        let mut at = 0usize;
+        for part in parts {
+            let part = part.as_ref();
+            bufs[0][at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        }
+        return 0;
     }
+    cur
 }
 
 /// Runs every person of one shard.
@@ -189,28 +185,45 @@ pub fn shard(st: &Stage, shard: usize, b: &mut Bench, out: &mut Out) {
         return;
     }
     let bits = st.seats.local_bits;
-    let people = 1usize << bits;
-    let low = (people - 1) as u64;
-    group(st.events.parts(shard), people, |r| (r[1] & low) as usize, &mut b.ev_end, &mut b.evs);
-    group(st.clicks.parts(shard), people, |r| (r[0] & low) as usize, &mut b.ck_end, &mut b.cks);
-    let mut evs = std::mem::take(&mut b.evs);
-    let mut cks = std::mem::take(&mut b.cks);
-    let (mut e0, mut c0) = (0usize, 0usize);
-    for l in 0..people {
-        let (e1, c1) = (b.ev_end[l] as usize, b.ck_end[l] as usize);
-        if e1 > e0 {
-            by_first_word(&mut evs[e0..e1], &mut b.spare);
-            if c1 - c0 > 1 {
-                by_first_word(&mut cks[c0..c1], &mut b.spare);
-            }
-            let seat = ((shard as u32) << bits) | l as u32;
-            person(st, seat, &evs[e0..e1], &cks[c0..c1], b, out);
+    let (etb, ctb) = (st.event_time_bits, st.click_time_bits);
+    let ei = sorted(st.events.parts(shard), bits + etb, &mut b.ev, &mut b.counts);
+    let ci = sorted(st.clicks.parts(shard), bits + ctb, &mut b.ck, &mut b.counts);
+    let evs = std::mem::take(&mut b.ev[ei]);
+    let cks = std::mem::take(&mut b.ck[ci]);
+    let mut spans = std::mem::take(&mut b.spans);
+    spans.clear();
+    let mut i = 0usize;
+    while i < evs.len() {
+        let who = evs[i][0] >> etb;
+        let mut j = i + 1;
+        while j < evs.len() && evs[j][0] >> etb == who {
+            j += 1;
         }
-        e0 = e1;
-        c0 = c1;
+        spans.push((who as u32, i as u32, j as u32));
+        i = j;
     }
-    b.evs = evs;
-    b.cks = cks;
+    // Names live far apart in memory; ask for them a few people ahead.
+    let lead_of = |who: u32| st.seats.lead(((shard as u32) << bits) | who) as usize;
+    let mut c = 0usize;
+    for (k, &(who, e0, e1)) in spans.iter().enumerate() {
+        if let Some(&(ahead, _, _)) = spans.get(k + 16) {
+            os::soon(&st.people.named[lead_of(ahead)]);
+        }
+        if let Some(&(ahead, _, _)) = spans.get(k + 8) {
+            os::soon(st.names.text(st.people.named[lead_of(ahead)]));
+        }
+        while c < cks.len() && ((cks[c][0] >> ctb) as u32) < who {
+            c += 1;
+        }
+        let c0 = c;
+        while c < cks.len() && (cks[c][0] >> ctb) as u32 == who {
+            c += 1;
+        }
+        person(st, lead_of(who), &evs[e0 as usize..e1 as usize], &cks[c0..c], b, out);
+    }
+    b.ev[ei] = evs;
+    b.ck[ci] = cks;
+    b.spans = spans;
 }
 
 fn close_day(st: &Stage, name: &[u8], day: i32, sessions: i32, events: i32, revenue: i64, buys: &mut Vec<(u32, u64)>, out: &mut UserCols) {
@@ -244,10 +257,11 @@ fn close_day(st: &Stage, name: &[u8], day: i32, sessions: i32, events: i32, reve
     buys.clear();
 }
 
-/// Time of a dealt click, on the events' clock (milliseconds after the window start).
+/// Time of a dealt click with its person bits removed, on the events' clock (milliseconds
+/// after the window start). `mask` keeps the time bits.
 #[inline(always)]
-fn click_time(c: &Row) -> i64 {
-    (c[0] >> 24) as i64 - WEEK_MS
+fn click_time(c: &Row, mask: u64) -> i64 {
+    (c[0] & mask) as i64 - WEEK_MS
 }
 
 #[inline(always)]
@@ -258,16 +272,16 @@ fn click_camp(c: &Row) -> u32 {
 /// Campaign of the click that credits a session, given that `clicks[..upto]` are the clicks at
 /// or before the session start and the last of them is within seven days.
 #[inline]
-fn credited(st: &Stage, clicks: &[Row], upto: usize) -> u32 {
+fn credited(st: &Stage, clicks: &[Row], upto: usize, m: u64) -> u32 {
     let last = &clicks[upto - 1];
-    let t = click_time(last);
-    if upto < 2 || click_time(&clicks[upto - 2]) != t {
+    let t = click_time(last, m);
+    if upto < 2 || click_time(&clicks[upto - 2], m) != t {
         return click_camp(last);
     }
     // Several clicks at the same millisecond: the smallest click_id wins.
     let mut first = upto - 1;
     let mut one_campaign = true;
-    while first > 0 && click_time(&clicks[first - 1]) == t {
+    while first > 0 && click_time(&clicks[first - 1], m) == t {
         first -= 1;
         one_campaign &= click_camp(&clicks[first]) == click_camp(last);
     }
@@ -284,10 +298,11 @@ fn credited(st: &Stage, clicks: &[Row], upto: usize) -> u32 {
     click_camp(best)
 }
 
-fn person(st: &Stage, seat: u32, evs: &[Row], clicks: &[Row], b: &mut Bench, out: &mut Out) {
-    let lead = st.seats.lead(seat);
+fn person(st: &Stage, lead: usize, evs: &[Row], clicks: &[Row], b: &mut Bench, out: &mut Out) {
     // SAFETY: `named` holds a number that was handed out.
-    let name = unsafe { (*st.names.text(st.people.named[lead as usize])).bytes() };
+    let name = unsafe { (*st.names.text(st.people.named[lead])).bytes() };
+    let time_mask = (1u64 << st.event_time_bits) - 1;
+    let m = (1u64 << st.click_time_bits) - 1;
     b.starts.clear();
     b.days.clear();
     b.revs.clear();
@@ -301,8 +316,8 @@ fn person(st: &Stage, seat: u32, evs: &[Row], clicks: &[Row], b: &mut Bench, out
     let (mut s_revenue, mut s_bought) = (0u64, false);
     let mut last = i64::MIN / 2;
     for e in evs {
-        let t = (e[0] >> 24) as i64;
-        let price = e[0] & 0xff_ffff;
+        let t = (e[0] & time_mask) as i64;
+        let price = e[1] & 0xffff_ffff;
         if t - last > GAP_MS {
             if !b.starts.is_empty() {
                 b.revs.push(s_revenue);
@@ -351,13 +366,13 @@ fn person(st: &Stage, seat: u32, evs: &[Row], clicks: &[Row], b: &mut Bench, out
     let (mut upto, mut from) = (0usize, 0usize);
     for s in 0..ns {
         let start = b.starts[s];
-        while upto < nc && click_time(&clicks[upto]) <= start {
+        while upto < nc && click_time(&clicks[upto], m) <= start {
             upto += 1;
         }
-        let camp = if upto == 0 || start - click_time(&clicks[upto - 1]) > WEEK_MS { organic } else { credited(st, clicks, upto) };
+        let camp = if upto == 0 || start - click_time(&clicks[upto - 1], m) > WEEK_MS { organic } else { credited(st, clicks, upto, m) };
         out.acc.credit(camp, b.days[s], b.bought[s], b.revs[s]);
         if small {
-            while from < upto && start - click_time(&clicks[from]) > WEEK_MS {
+            while from < upto && start - click_time(&clicks[from], m) > WEEK_MS {
                 from += 1;
             }
             let mut seen = [0u32; 16];
@@ -386,7 +401,7 @@ fn person(st: &Stage, seat: u32, evs: &[Row], clicks: &[Row], b: &mut Bench, out
         }
     }
     b.camp_times.clear();
-    b.camp_times.extend(clicks.iter().map(|c| (click_camp(c), click_time(c))));
+    b.camp_times.extend(clicks.iter().map(|c| (click_camp(c), click_time(c, m))));
     b.camp_times.sort_unstable();
     let mut k = 0;
     while k < b.camp_times.len() {
@@ -441,18 +456,20 @@ mod tests {
             state ^= state << 17;
             state
         };
-        for (n, mask) in [(5000usize, !0u64), (5000, 0xffff_ff00_0000), (9000, 0x7ff), (4096, 0), (6000, 0xffff_ffff_ff00_0000)] {
-            let mut rows: Vec<Row> = (0..n).map(|i| [next() & mask, i as u64]).collect();
+        for (n, bits) in [(5000usize, 64u32), (5000, 40), (9000, 11), (4096, 1), (6000, 23), (100, 40), (0, 40), (1, 3), (300, 0)] {
+            let mask = if bits == 64 { !0 } else { (1u64 << bits) - 1 };
+            let rows: Vec<Row> = (0..n).map(|i| [next() & mask, i as u64]).collect();
             let mut want = rows.clone();
             want.sort_by_key(|r| r[0]);
-            let mut spare = Vec::new();
-            by_first_word(&mut rows, &mut spare);
-            assert_eq!(rows, want);
+            for cut in [1usize, 3, 7] {
+                let parts: Vec<&[Row]> = rows.chunks((n / cut).max(1)).collect();
+                let mut bufs = [Vec::new(), Vec::new()];
+                let i = sorted(parts.iter().copied(), bits, &mut bufs, &mut Vec::new());
+                assert_eq!(bufs[i].iter().map(|r| r[0]).collect::<Vec<_>>(), want.iter().map(|r| r[0]).collect::<Vec<_>>(), "n {n} bits {bits}");
+                let mut seen: Vec<u64> = bufs[i].iter().map(|r| r[1]).collect();
+                seen.sort_unstable();
+                assert_eq!(seen, (0..n as u64).collect::<Vec<_>>());
+            }
         }
-        let mut small: Vec<Row> = (0..20).map(|i| [next() % 7, i]).collect();
-        let mut want = small.clone();
-        want.sort_by_key(|r| r[0]);
-        by_first_word(&mut small, &mut Vec::new());
-        assert_eq!(small.iter().map(|r| r[0]).collect::<Vec<_>>(), want.iter().map(|r| r[0]).collect::<Vec<_>>());
     }
 }

@@ -3,7 +3,7 @@
 //! Page bodies are assembled column by column; the footer is described as a small tree of values
 //! (`Tv`) that a generic routine turns into Thrift compact-protocol bytes.
 
-use std::io::Write;
+use std::io::{IoSlice, Write};
 use std::path::Path;
 
 /// Rows per data page.
@@ -84,13 +84,13 @@ impl ColumnView<'_> {
         matches!(self, ColumnView::MaybeText(_))
     }
 
-    /// Body of data page `p` (definition levels first when nullable).
-    fn page_body(&self, p: usize, lo: usize, hi: usize) -> Vec<u8> {
-        let mut out = Vec::new();
+    /// Body of data page `p` as one or two pieces: a small owned prefix (the definition
+    /// levels of a nullable column) and the values, borrowed from the column.
+    fn page_body(&self, p: usize, lo: usize, hi: usize) -> (Vec<u8>, &[u8]) {
         match self {
-            ColumnView::Int64(v) => v[lo..hi].iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
-            ColumnView::Date(v) | ColumnView::Int32(v) => v[lo..hi].iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
-            ColumnView::Text(c) => out.extend_from_slice(slice_of_page(&c.bytes, &c.page_starts, p)),
+            ColumnView::Int64(v) => (Vec::new(), raw_bytes(&v[lo..hi])),
+            ColumnView::Date(v) | ColumnView::Int32(v) => (Vec::new(), raw_bytes(&v[lo..hi])),
+            ColumnView::Text(c) => (Vec::new(), slice_of_page(&c.bytes, &c.page_starts, p)),
             ColumnView::MaybeText(c) => {
                 // Definition levels: one bit-packed run of 1-bit values.
                 let groups = (hi - lo).div_ceil(8);
@@ -101,13 +101,21 @@ impl ColumnView<'_> {
                 let mut levels = Vec::new();
                 put_varint(&mut levels, ((groups as u64) << 1) | 1);
                 levels.extend_from_slice(&packed);
-                out.extend_from_slice(&(levels.len() as u32).to_le_bytes());
+                let mut out = (levels.len() as u32).to_le_bytes().to_vec();
                 out.extend_from_slice(&levels);
-                out.extend_from_slice(slice_of_page(&c.bytes, &c.page_starts, p));
+                (out, slice_of_page(&c.bytes, &c.page_starts, p))
             }
         }
-        out
     }
+}
+
+#[cfg(not(target_endian = "little"))]
+compile_error!("the Parquet writer stores integers as they sit in memory");
+
+/// The values of an integer column as the bytes Parquet's plain encoding wants.
+fn raw_bytes<T: Copy>(v: &[T]) -> &[u8] {
+    // SAFETY: integers have no padding; on a little-endian machine their bytes are the encoding.
+    unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
 }
 
 fn slice_of_page<'a>(bytes: &'a [u8], starts: &[usize], p: usize) -> &'a [u8] {
@@ -247,21 +255,32 @@ fn chunk_entry(name: &str, col: &ColumnView, rows: usize, offset: i64, size: i64
     vec![(2, Tv::I64(offset)), (3, Tv::Struct(meta))]
 }
 
-/// Writes `columns` (named by `names`) as one Parquet file at `path`.
+/// A piece of the file: bytes made for it, or bytes that already sit in a column.
+enum Piece<'a> {
+    Made(Vec<u8>),
+    Lent(&'a [u8]),
+}
+
+/// Writes `columns` (named by `names`) as one Parquet file at `path`. Column values go to the
+/// file straight from where they are.
 pub fn write_table(path: &Path, names: &[&str], columns: &[ColumnView]) -> std::io::Result<()> {
     let rows = columns.first().map_or(0, |c| c.len());
-    let mut file: Vec<u8> = b"PAR1".to_vec();
+    let mut pieces: Vec<Piece> = vec![Piece::Made(b"PAR1".to_vec())];
+    let mut at = 4usize;
     let mut placed: Vec<(i64, i64)> = Vec::new();
     if rows > 0 {
         for col in columns {
-            let begin = file.len();
+            let begin = at;
             for (p, lo) in (0..rows).step_by(ROWS_PER_PAGE).enumerate() {
                 let hi = (lo + ROWS_PER_PAGE).min(rows);
-                let body = col.page_body(p, lo, hi);
-                file.extend_from_slice(&page_header(hi - lo, body.len()));
-                file.extend_from_slice(&body);
+                let (prefix, values) = col.page_body(p, lo, hi);
+                let mut head = page_header(hi - lo, prefix.len() + values.len());
+                head.extend_from_slice(&prefix);
+                at += head.len() + values.len();
+                pieces.push(Piece::Made(head));
+                pieces.push(Piece::Lent(values));
             }
-            placed.push((begin as i64, (file.len() - begin) as i64));
+            placed.push((begin as i64, (at - begin) as i64));
         }
     }
 
@@ -283,8 +302,29 @@ pub fn write_table(path: &Path, names: &[&str], columns: &[ColumnView]) -> std::
     ];
     let mut footer = Vec::new();
     put_struct(&mut footer, &footer_tree);
-    file.extend_from_slice(&footer);
-    file.extend_from_slice(&(footer.len() as u32).to_le_bytes());
-    file.extend_from_slice(b"PAR1");
-    std::fs::File::create(path)?.write_all(&file)
+    let footer_len = footer.len() as u32;
+    footer.extend_from_slice(&footer_len.to_le_bytes());
+    footer.extend_from_slice(b"PAR1");
+    pieces.push(Piece::Made(footer));
+
+    let mut slices: Vec<IoSlice> = pieces
+        .iter()
+        .map(|p| match p {
+            Piece::Made(v) => IoSlice::new(v),
+            Piece::Lent(v) => IoSlice::new(v),
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut file = std::fs::File::create(path)?;
+    let mut rest = &mut slices[..];
+    while !rest.is_empty() {
+        // Few pieces per call: some systems cap how many one write may carry.
+        let take = rest.len().min(64);
+        let n = file.write_vectored(&rest[..take])?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "could not write the table"));
+        }
+        IoSlice::advance_slices(&mut rest, n);
+    }
+    Ok(())
 }

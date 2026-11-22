@@ -279,6 +279,8 @@ fn run() -> Result<(), String> {
     lg!(t0, "dedup", "deduped");
 
     // ---- 4. Deal ----
+    let event_time_bits = shard::bits_for(sh.win.we - sh.win.ws);
+    let click_time_bits = shard::bits_for(sh.win.we - sh.win.cws);
     let ev_layout = Layout::new(&tallies.iter().map(|t| &t.events[..]).collect::<Vec<_>>(), shards);
     let ck_layout = Layout::new(&tallies.iter().map(|t| &t.clicks[..]).collect::<Vec<_>>(), shards);
     let ev_out = Shareable(os::zeroed_array::<Row>(ev_layout.total));
@@ -289,9 +291,9 @@ fn run() -> Result<(), String> {
         let mut dealer = Dealer::new(shards);
         let mine: Vec<&Run<Ev>> = t.event_runs.iter().map(|&i| &ev_runs[i]).collect();
         // SAFETY: the layout reserved room for exactly the rows this worker tallied.
-        let e = unsafe { shard::deal_events(&mine, &seats, &mut dealer, ev_out.0, &ev_layout.at[w]) };
+        let e = unsafe { shard::deal_events(&mine, &seats, event_time_bits, &mut dealer, ev_out.0, &ev_layout.at[w]) };
         let mine: Vec<(&Run<Ck>, u32)> = t.click_runs.iter().map(|&k| (&ck_runs[k].0, ck_runs[k].1)).collect();
-        let c = unsafe { shard::deal_clicks(&mine, &seats, &mut dealer, ck_out.0, &ck_layout.at[w]) };
+        let c = unsafe { shard::deal_clicks(&mine, &seats, click_time_bits, &mut dealer, ck_out.0, &ck_layout.at[w]) };
         (e, c)
     });
     let (ev_got, ck_got): (Vec<Vec<u32>>, Vec<Vec<u32>>) = got.into_iter().unzip();
@@ -307,6 +309,8 @@ fn run() -> Result<(), String> {
         seats: &seats,
         events: Dealt { rows: ev_out.0, at: &ev_layout.at, got: &ev_got },
         clicks: Dealt { rows: ck_out.0, at: &ck_layout.at, got: &ck_got },
+        event_time_bits,
+        click_time_bits,
         click_runs: &ck_runs,
     };
     let mut order: Vec<usize> = (0..shards).collect();
