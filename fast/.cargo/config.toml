@@ -1,0 +1,6 @@
+# x86-64-v3 (AVX2, BMI2) baseline for the fast path only. If the CPU lacks it, SIGILL
+# triggers the hand-off to the general binary, which is built for baseline x86-64.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+crt-static"]
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
