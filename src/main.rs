@@ -230,6 +230,10 @@ fn run() -> Result<(), String> {
     }
     let ev_total: usize = ev_runs.iter().map(|r| r.n).sum();
     lg!(t0, "read", "read: {} event rows, {} clicks, {} user ids", ev_total, ck_total, ids);
+    if parse::SKIP != 0 {
+        eprintln!("stages{}", t0.short);
+        return Ok(());
+    }
 
     // ---- 2. Tally ----
     let seats = Seating::new(ids, ev_total);

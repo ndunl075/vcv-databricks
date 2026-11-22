@@ -238,6 +238,9 @@ impl<'a> Flight<'a> {
     }
 }
 
+/// Experiment switches for timing parts of the reader; 0 in every real build.
+pub const SKIP: u32 = 0;
+
 const VIEW: u64 = u64::from_le_bytes(*b"view\0\0\0\0");
 const CART: u64 = u64::from_le_bytes(*b"cart\0\0\0\0");
 const PURCHASE: u64 = u64::from_le_bytes(*b"purchase");
@@ -280,6 +283,9 @@ impl Rows<6> for EventRows<'_, '_> {
 
     #[inline(always)]
     unsafe fn row(&mut self, from: usize, c: &[usize; 6], to: usize, quotes: u32) {
+        if SKIP & 1 != 0 {
+            return;
+        }
         let d = self.data;
         let mut f = Fields::new();
         let (mut a0, mut e0) = (from, c[0]);
@@ -296,7 +302,7 @@ impl Rows<6> for EventRows<'_, '_> {
         f.strip(d, &mut a4, &mut e4);
         f.strip(d, &mut a5, &mut e5);
         f.strip(d, &mut a6, &mut e6);
-        if !f.sound(quotes) | (a0 == e0) {
+        if !f.sound(quotes) | (a0 == e0) | (SKIP & 2 != 0) {
             return;
         }
         let sh = self.fl.sh;
@@ -307,8 +313,7 @@ impl Rows<6> for EventRows<'_, '_> {
         let user_hash = spread(&user_key);
         self.fl.table.warm(user_hash);
 
-        let ts = self.dates.instant(d.add(a2), e2 - a2);
-        let ingest = self.dates.instant(d.add(a3), e3 - a3);
+        let (ts, ingest) = if SKIP & 4 != 0 { (sh.win.ws + 5, sh.win.ws + 6) } else { (self.dates.instant(d.add(a2), e2 - a2), self.dates.instant(d.add(a3), e3 - a3)) };
         let mut ok = (user_len != 0) & (a5 != e5) & (ts >= sh.win.ws) & (ts < sh.win.we) & (ingest != NEVER);
         ok &= ingest.saturating_sub(ts) <= DAY_MS;
         let kind_len = e4 - a4;
@@ -340,6 +345,9 @@ impl Rows<6> for EventRows<'_, '_> {
         let key = if ok { (((ts - sh.win.ws) as u64) << 24) | price as u64 } else { 0 };
         rec.write(Ev { key, who: NOBODY, cat, tag, at: at as u32 });
         let into = if ok { std::ptr::addr_of_mut!((*rec).who) } else { std::ptr::null_mut() };
+        if SKIP & 8 != 0 {
+            return;
+        }
         self.fl.push(self.supply, Pending { into, key: user_key, hash: user_hash, at: d.add(a1), len: user_len, tag, marks: true });
     }
 }
