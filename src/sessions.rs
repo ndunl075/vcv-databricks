@@ -104,8 +104,8 @@ pub struct Bench {
     day_of: Vec<i32>,
 }
 
+/// Widest digit of the shard sort.
 const DIGIT: u32 = 11;
-const BUCKETS: usize = 1 << DIGIT;
 
 /// Sorts the rows of `parts` by the low `bits` bits of their first word (the higher bits must be
 /// equal). The sorted rows end up in `bufs[i]` for the returned `i`.
@@ -123,15 +123,19 @@ fn sorted(parts: impl Iterator<Item = impl AsRef<[Row]>> + Clone, bits: u32, buf
         return 0;
     }
     let passes = bits.div_ceil(DIGIT).max(1) as usize;
+    // As many passes as 11-bit digits need, with the digits as narrow as that allows: smaller
+    // count tables, fewer places to scatter to.
+    let digit = bits.div_ceil(passes as u32).max(1);
+    let buckets = 1usize << digit;
     counts.clear();
-    counts.resize(passes * BUCKETS, 0);
+    counts.resize(passes * buckets, 0);
     for part in parts.clone() {
         for r in part.as_ref() {
             let mut w = r[0];
             for p in 0..passes {
-                // SAFETY: the index is below passes * BUCKETS.
-                unsafe { *counts.get_unchecked_mut(p * BUCKETS + (w as usize & (BUCKETS - 1))) += 1 };
-                w >>= DIGIT;
+                // SAFETY: the index is below passes * buckets.
+                unsafe { *counts.get_unchecked_mut(p * buckets + (w as usize & (buckets - 1))) += 1 };
+                w >>= digit;
             }
         }
     }
@@ -144,7 +148,7 @@ fn sorted(parts: impl Iterator<Item = impl AsRef<[Row]>> + Clone, bits: u32, buf
     let mut from_parts = true;
     let mut cur = 1usize; // rows are in bufs[cur] once `from_parts` is false
     for p in 0..passes {
-        let c = &mut counts[p * BUCKETS..(p + 1) * BUCKETS];
+        let c = &mut counts[p * buckets..(p + 1) * buckets];
         if c.iter().any(|&n| n as usize == total) {
             continue; // every row has the same digit here
         }
@@ -154,13 +158,13 @@ fn sorted(parts: impl Iterator<Item = impl AsRef<[Row]>> + Clone, bits: u32, buf
             *x = run;
             run += n;
         }
-        let shift = p as u32 * DIGIT;
+        let shift = p as u32 * digit;
         let dst = 1 - cur;
         let out = bufs[dst].as_mut_ptr();
         let mut place = |r: &Row| {
             // SAFETY: counts place every row at a distinct index below `total`.
             unsafe {
-                let slot = c.get_unchecked_mut((r[0] >> shift) as usize & (BUCKETS - 1));
+                let slot = c.get_unchecked_mut((r[0] >> shift) as usize & (buckets - 1));
                 out.add(*slot as usize).write(*r);
                 *slot += 1;
             }
