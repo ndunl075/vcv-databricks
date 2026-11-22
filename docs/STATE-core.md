@@ -51,3 +51,26 @@ Read split from ablation runs on a Zen 4 runner: index + row framing 0.24 s, fie
 - **Measured** (2-vCPU x86 runners, 20M v5, docker wall, medians of 5, alternated on the same machine): EPYC 9V45 2.94 -> 2.39 s, 9V74 3.60 -> about 3.2 s; EPYC 7763 and Xeon 6975P unchanged within noise (their disks flush fast). Every run: 51/51 fixtures, v5 dev answer MATCH, 0 differing rows vs b4da8d4 on dev, two 3M sets and 20M.
 - **Tried, no gain (not kept):** whole binary built for x86-64-v3; lookup ring of 16; word-at-a-time field scan in dedup (dedup is bound by row misses, not the scan). Probes on x86: skipping lookups saves about 12% of read, skipping timestamps about 10%, skipping all field work about 55%.
 - x86 profile (perf, line tables, 9V45): read_fast 47%, person stage 13% plus its radix sort 7%, sweep 8%, dedup 7%. Hottest line: the user table cell load in `ids.rs` `number` (about 6%, a cache miss despite the prefetch).
+
+## Locked marks and what followed (2026-11-22, branches core-bgflush .. core-tagbins)
+
+Scores: core-smaller-output 1.1594, core-tagparts 1.1542, core-tagbins 1.1228 (practice board; the
+board itself says machines differ by up to 20%).
+
+- Intel profile (Xeon 6975P / 8573C): the hottest spot in `read_fast` was `Cells::mark`, a
+  `fetch_or` whose old value was used, compiled to a `lock cmpxchg` loop. A racy unlocked build
+  (never shipped) was 9% faster on the 8573C, 3% on the 6975P, 1-2% on AMD.
+- core-bgflush: `start_writeback` runs on a helper thread (it blocked workers when the disk was
+  busy). Neutral on a quiet disk.
+- core-tagparts: readers file event tags into 256 ranges by top tag byte; after reading, each
+  worker marks whole ranges with plain writes (a range of cells is under 1 MB). Read CPU on the
+  8573C 4.78 -> 3.85 s; 8573C wall -8%; AMD 0-3% slower.
+- core-tagbins: the tag lists are fixed bins in one huge-page region (plus spill lists), not
+  growing vectors. 1-3.5% faster on every runner.
+
+Tried, no gain (branches kept on the test repo):
+- exp-bts: one `lock bts` after a plain read. About 1% on Intel; superseded by core-tagparts.
+- core-flagsus: flag suspects in the record during the mark pass so sweep skips the cells.
+  1-5% slower everywhere: the record writes and 8 more bytes per event cost more than the reads.
+- core-sort: radix on person bits only, then insertion sort per person by time. Neutral to 3%
+  slower; the 4-pass radix on ~80 KB shards runs from L2 and beats unsorted insertion sorts.
