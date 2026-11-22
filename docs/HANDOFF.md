@@ -7,6 +7,11 @@ Read this first. Cutoff is **Sun 2026-11-22 11:00 AM ET**. Track page with the r
 - That score is commit `efef389` of branch `core`. It was submitted from a separate entry-only repo (see "How to submit").
 - Commit `223ecb7` on `core` passes 51/51 fixtures, the 1M dev set, and a 20M set with reshuffled IDs against our reference checker. It is only about 4% faster than `efef389`, so it was not submitted.
 
+## State of each branch when the first machine stopped (2026-11-21 about 20:50 ET)
+- **`core` head `23d1bc9`**: passes 17 unit tests, 51/51 fixtures, the dev set and the 1M unusual-data sets when built natively. **Not yet built or run as the x86 image** (`make docker-check`): do that first. The last commit verified as an image is `223ecb7` (fixtures, dev set, 20M reshuffled-ID set and stock 20M set, checked with `tools/db-candidate.sh`; the pinned base image built fine there). Details and next speed steps: `docs/STATE-core.md` on `core`.
+- **`fast` head `1eccd75`**: the shortcut path matches `ss` exactly on the dev set, 51 fixtures, 40 unusual datasets and 14 generated seeds, natively on macOS, and hands off cleanly on failure. Never built or timed in the Linux x86 image; signal hand-off and the x86 line splitter are untested. Not submittable until that is done. Details: `fast/README.md` on `fast`.
+- **`bench`**: see `bench/README.md`. Known issue: the oracle's fast (DuckDB) engine disagrees with its own naive engine on `ood-id-digits-1m` (IDs made only of digits); the naive engine and our pipeline agree, so trust the naive engine there until the fast one is fixed.
+
 ## What decides the prize
 - Only the final counts: about 60M NEW events, each run capped at 3 minutes, the ten fastest retimed 9 times on an idle machine. One wrong row, a crash or a run over 3 minutes means no score.
 - Organizers said in chat: the final is "out of distribution data, so you can't overfit" and "Submissions will be ranked on new data, so don't overfit".
