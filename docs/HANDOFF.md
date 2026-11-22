@@ -7,6 +7,10 @@ Read this first. Cutoff is **Sun 2026-11-22 11:00 AM ET**. Track page with the r
 - That score is commit `efef389` of branch `core`. It was submitted from a separate entry-only repo (see "How to submit").
 - Commit `223ecb7` on `core` passes 51/51 fixtures, the 1M dev set, and a 20M set with reshuffled IDs against our reference checker. It is only about 4% faster than `efef389`, so it was not submitted.
 
+## Who works on what (updated 2026-11-21 21:05 ET)
+- **Branch `core` (general pipeline) is being worked on again on the first machine**, by a builder doing native speed work. Do not push to `core` from elsewhere; branch from it if you want to try something.
+- **Branch `fast` (the shortcut path) and the rival timing on branch `bench` are free for the second machine.** The most useful things there: build `fast/` in the x86 image and time it against `ss`; time the strongest rivals on stock and reshuffled-ID data.
+
 ## State of each branch when the first machine stopped (2026-11-21 about 20:50 ET)
 - **`core` head `23d1bc9`**: passes 17 unit tests, 51/51 fixtures, the dev set and the 1M unusual-data sets when built natively. **Not yet built or run as the x86 image** (`make docker-check`): do that first. The last commit verified as an image is `223ecb7` (fixtures, dev set, 20M reshuffled-ID set and stock 20M set, checked with `tools/db-candidate.sh`; the pinned base image built fine there). Details and next speed steps: `docs/STATE-core.md` on `core`.
 - **`fast` head `1eccd75`**: the shortcut path matches `ss` exactly on the dev set, 51 fixtures, 40 unusual datasets and 14 generated seeds, natively on macOS, and hands off cleanly on failure. Never built or timed in the Linux x86 image; signal hand-off and the x86 line splitter are untested. Not submittable until that is done. Details: `fast/README.md` on `fast`.
