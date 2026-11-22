@@ -1,20 +1,25 @@
 # CI stopwatch results
 
-**Status (2026-11-22 02:15 UTC): no real-x86 numbers yet.** GitHub refuses to start any job on this account:
-"The job was not started because recent account payments have failed or your spending limit needs to be increased"
-(runs 44974990943 and 44975123966, both failed in 2 s with zero steps). It is a billing setting on the account, not
-something the workflows can fix. Once Billing & plans allows private-repo Actions minutes, run:
+Runs happen on free GitHub-hosted x86 runners of a separate public runner repo (inputs and results are opaque/encrypted;
+see `ci/entry.sh`, `ci/_pub.sh`). Commands: `ci/bench.sh core 223ecb7`, `ci/rivals.sh`. Raw logs and tables:
+`~/Developer/vcv-data/db/ci/<run-id>/`. Runners are 4 vCPU / 15 GB and the CPU model varies from job to job (see each table);
+treat results as real-x86 ratios, not the scorer's absolute times (8 pinned vCPUs).
 
-    ci/bench.sh core 223ecb7        # one table, saved to ~/Developer/vcv-data/db/ci/<run-id>.md
-    ci/rivals.sh                    # all rivals in ci/rivals.txt, one table
+## bench: `core` (23d1bc9c) vs `223ecb7`, 20M events, run 44976005273
 
-Both default to 20M events, seed 7. If the first run is too slow for the runner, pass a smaller size, e.g.
-`ci/bench.sh core 223ecb7 10000000` and `ci/rivals.sh "" 10000000`.
+### Stopwatch: `23d1bc9c` (23d1bc9c) vs `223ecb78` (223ecb78)
 
-## What was checked without the runner
-- Trigger/wait/report path of `ci/_wait.sh` (dispatch, find the run id by REST, poll every 20 s, read the failure annotation).
-- `ci/bench_run.py` end to end on the Mac (arm64 images, 1M events, 2 runs): both images build, `core` matches
-  `kit/dev-answer`, tables MATCH between `core` and `223ecb7` on stock and on the `remap` set, summary table renders.
-  These timings are emulation-free arm64 on a loaded Mac and mean nothing.
-- `ci/mutate_remap.py` (branch `bench` mutator, `remap`, registered for a seed-7 dataset) and `ci/summarize_rivals.py` (fake rows).
-- Not run anywhere: `rivals.yml`, `ci/rival_job.py` (rival code is never run on the Mac), caching, the 20M data steps.
+Runner: **4 vCPU**, 15.3 GB RAM, `Intel(R) Xeon(R) 6975P-C`. avx2=True avx512f=True avx512bw=True. Container limits: no network, read-only root, uid 1000, `NCPU=4`, `MEM_GB=13`. Data: 20,000,000 events, seed 7. 5 timed runs each, alternating, wall time from container start to exit.
+
+These are real-x86 **ratios** on a small shared runner, not the scorer's absolute times (8 pinned vCPUs).
+
+| dataset | ref median s | ref best s | baseline median s | baseline best s | speedup (median) | speedup (best) | tables |
+|---|---|---|---|---|---|---|---|
+| stock (generator IDs) | 3.32 | 3.27 | 3.42 | 3.37 | 1.03x | 1.03x | MATCH |
+| reshuffled IDs (remap) | 3.57 | 3.52 | 3.67 | 3.62 | 1.03x | 1.03x | MATCH |
+
+`ref` vs `kit/dev-answer` on the 1M seed-1 dev set: **MATCH**
+
+All wall times (s):
+- stock ref: 3.32, 3.32, 3.27, 3.32, 3.28; baseline: 3.37, 3.43, 3.42, 3.42, 3.47
+- remap ref: 3.57, 3.57, 3.62, 3.52, 3.53; baseline: 3.67, 3.67, 3.67, 3.67, 3.62
