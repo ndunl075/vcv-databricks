@@ -162,6 +162,23 @@ pub fn quit(code: i32) -> ! {
     unsafe { sys::leave(code) }
 }
 
+/// Hint that the cache line at `p` will soon be changed: fetch it ready for writing. Never faults.
+#[inline(always)]
+pub fn soon_write<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: prefetchw is a hint and accepts any address; older processors treat it as a no-op.
+    unsafe {
+        std::arch::asm!("prefetchw [{0}]", in(reg) p, options(nostack, preserves_flags, readonly));
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: prefetch is a hint and accepts any address.
+    unsafe {
+        std::arch::asm!("prfm pstl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags, readonly));
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = p;
+}
+
 /// Hint that the cache line at `p` will be used soon. Never faults.
 #[inline(always)]
 pub fn soon<T>(p: *const T) {

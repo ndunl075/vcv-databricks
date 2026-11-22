@@ -99,8 +99,14 @@ impl Cells {
         let sh = (cell & 31) * 2;
         // SAFETY: see `word_of`.
         let w = unsafe { &*self.word_of(tag) };
-        let before = w.fetch_or(1 << sh, Relaxed);
-        if (before >> sh) & 3 == 1 {
+        // Marks only ever add bits, so a plain read that already shows them settles it without a
+        // locked instruction. Otherwise one test-and-set of the first bit (a single `lock bts`,
+        // not a compare-exchange loop) says whether another row got there first.
+        let now = w.load(Relaxed) >> sh;
+        if now & 2 != 0 {
+            return;
+        }
+        if now & 1 != 0 || w.fetch_or(1 << sh, Relaxed) & (1 << sh) != 0 {
             w.fetch_or(2 << sh, Relaxed);
         }
     }
@@ -295,7 +301,7 @@ impl Rows<6> for EventRows<'_, '_> {
         }
         let sh = self.fl.sh;
         let tag = (hash_of(d.add(a0), e0 - a0) >> 32) as u32;
-        os::soon(sh.cells.word_of(tag));
+        os::soon_write(sh.cells.word_of(tag));
         let user_len = e1 - a1;
         let (user_key, user_hash) = self.fl.table.begin(d.add(a1), user_len);
 
