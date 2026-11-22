@@ -153,19 +153,39 @@ impl Index {
     }
 }
 
-/// Receives rows that have exactly `N` commas.
+/// Receives well-formed rows that have exactly `N` commas.
 pub trait Rows<const N: usize> {
     /// Called before each window is read; at most `rows` rows arrive before the next call.
     ///
     /// # Safety
-    /// Only `rows_in` calls this.
+    /// Only the scanners call this.
     unsafe fn window(&mut self, rows: usize);
-    /// One row: it starts at `from`, its commas are at `commas`, it ends before `to`, and it holds
-    /// `quotes` quote characters. All offsets are from the start of the data.
+    /// One row starting at `from`: field `k` is `data[a[k]..e[k]]`, quotes already removed.
+    /// Only the first `N + 1` entries are set. All offsets are from the start of the data.
     ///
     /// # Safety
-    /// Only `rows_in` calls this.
-    unsafe fn row(&mut self, from: usize, commas: &[usize; N], to: usize, quotes: u32);
+    /// Only the scanners call this.
+    unsafe fn fields(&mut self, from: usize, a: &[usize; 8], e: &[usize; 8]);
+}
+
+/// Removes the quotes of a row with `N` commas and passes it on if it is well formed.
+#[inline(always)]
+unsafe fn deliver<R: Rows<N>, const N: usize>(sink: &mut R, data: *const u8, from: usize, commas: &[usize; N], to: usize, quotes: u32) {
+    let (mut a, mut e) = ([0usize; 8], [0usize; 8]);
+    let mut f = Fields::new();
+    let mut start = from;
+    for k in 0..N {
+        a[k] = start;
+        e[k] = commas[k];
+        start = commas[k] + 1;
+        f.strip(data, &mut a[k], &mut e[k]);
+    }
+    a[N] = start;
+    e[N] = to;
+    f.strip(data, &mut a[N], &mut e[N]);
+    if f.sound(quotes) {
+        sink.fields(from, &a, &e);
+    }
 }
 
 /// Writes the offsets of the set bits of `m` (plus `base`) at `out[*n..]`.
@@ -249,7 +269,7 @@ pub unsafe fn rows_in<L: Lens, R: Rows<N>, const N: usize>(ix: &mut Index, data:
                         *slot = w + *commas.add(ci + i) as usize;
                     }
                     ci += N;
-                    sink.row(row_at, &c, w + end, quotes);
+                    deliver(sink, data, row_at, &c, w + end, quotes);
                 } else {
                     while (*commas.add(ci) as usize) < end {
                         ci += 1;
@@ -267,7 +287,7 @@ pub unsafe fn rows_in<L: Lens, R: Rows<N>, const N: usize>(ix: &mut Index, data:
                     ci += 1;
                 }
                 if n == N {
-                    sink.row(row_at, &c, w + end, quotes);
+                    deliver(sink, data, row_at, &c, w + end, quotes);
                 }
             }
             row_at = w + end + 1;
@@ -284,6 +304,220 @@ pub unsafe fn rows_in<L: Lens, R: Rows<N>, const N: usize>(ix: &mut Index, data:
         }
         held_quotes += q - quotes_at_row;
         w = stop;
+    }
+}
+
+/// `pext`: the bits of `x` selected by `mask`, packed into the low bits.
+pub trait Squeeze {
+    /// # Safety
+    /// The CPU must support the implementation.
+    unsafe fn squeeze(x: u64, mask: u64) -> u64;
+}
+
+/// Works everywhere, one mask bit at a time.
+pub struct SlowSqueeze;
+
+impl Squeeze for SlowSqueeze {
+    #[inline(always)]
+    unsafe fn squeeze(x: u64, mut mask: u64) -> u64 {
+        let (mut out, mut k) = (0u64, 0u32);
+        while mask != 0 {
+            out |= ((x >> mask.trailing_zeros()) & 1) << k;
+            k += 1;
+            mask &= mask - 1;
+        }
+        out
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub struct Bmi2;
+
+#[cfg(target_arch = "x86_64")]
+impl Squeeze for Bmi2 {
+    #[inline(always)]
+    unsafe fn squeeze(x: u64, mask: u64) -> u64 {
+        std::arch::x86_64::_pext_u64(x, mask)
+    }
+}
+
+/// Scratch space for `rows_wide`.
+pub struct Wide {
+    /// Offsets of the separators (commas and line ends) of the window; entry 0 stands for the
+    /// line end just before the window.
+    seps: Vec<u32>,
+    /// One bit per separator, in the same order: "is a line end".
+    is_end: Vec<u8>,
+    /// One bit per separator: "the field after it opens with a quote".
+    opens: Vec<u8>,
+    /// Per 64-byte block, shifted by one so a block's neighbours always exist.
+    sep: [u64; BLOCKS + 2],
+    line: [u64; BLOCKS + 2],
+    quote: [u64; BLOCKS + 2],
+}
+
+const BIT_BYTES: usize = (WINDOW + 64) / 8 + 24;
+
+impl Wide {
+    pub fn new() -> Wide {
+        Wide { seps: vec![0; WINDOW + 96], is_end: vec![0; BIT_BYTES], opens: vec![0; BIT_BYTES], sep: [0; BLOCKS + 2], line: [0; BLOCKS + 2], quote: [0; BLOCKS + 2] }
+    }
+}
+
+/// Appends the low bits of `x` to a bit string at bit `at` (the string is zero from `at` on,
+/// and `x` has no bits set above those to append).
+#[inline(always)]
+unsafe fn put_bits(bits: *mut u8, at: usize, x: u64) {
+    let p = bits.add(at >> 3);
+    let sh = at & 7;
+    let word = p as *mut u64;
+    word.write_unaligned(word.read_unaligned() | (x << sh).to_le());
+    *p.add(8) |= ((x >> 1) >> (63 - sh)) as u8;
+}
+
+/// 57 or more bits of a bit string starting at bit `at`.
+#[inline(always)]
+unsafe fn bits_at(bits: *const u8, at: usize) -> u64 {
+    u64::from_le((bits.add(at >> 3) as *const u64).read_unaligned()) >> (at & 7)
+}
+
+/// Offset just past the first `\n` in `data[from..to]`, or `to`.
+unsafe fn after_line_end(data: *const u8, from: usize, to: usize) -> usize {
+    let mut p = from;
+    while p < to {
+        if *data.add(p) == b'\n' {
+            return p + 1;
+        }
+        p += 1;
+    }
+    to
+}
+
+/// Same contract and same results as `rows_in`, built for CPUs with a fast `pext`.
+///
+/// Every window starts at a row start. Commas and line ends go into one list of separators,
+/// with a bit per separator for "is a line end" and for "the next field opens with a quote", so a
+/// row is taken with one test (N commas, then a line end) and its quotes are removed by
+/// arithmetic. Whether quotes sit where the dialect allows is decided per 64-byte block:
+/// every quote must touch exactly one separator, and a field that opens with a quote must close
+/// with one. From the first row that breaks a rule, or is too long for a window, the rest of the
+/// window goes through `rows_in`, which stays the definition of the dialect.
+///
+/// # Safety
+/// As `rows_in`; `Q` must be usable on this CPU.
+#[inline(always)]
+pub unsafe fn rows_wide<L: Lens, Q: Squeeze, R: Rows<N>, const N: usize>(ix: &mut Index, wx: &mut Wide, data: *const u8, from: usize, to: usize, open_end: bool, sink: &mut R) {
+    let seps = wx.seps.as_mut_ptr();
+    let (is_end, opens) = (wx.is_end.as_mut_ptr(), wx.opens.as_mut_ptr());
+    let mut w = from;
+    while w < to {
+        let stop = (w + WINDOW).min(to);
+        sink.window(WINDOW / (N + 1) + 2);
+        let blocks = (stop - w + 63) / 64;
+        for b in 0..blocks {
+            let off = b * 64;
+            let mut m = L::marks(data.add(w + off));
+            let left = stop - w - off;
+            if left < 64 {
+                let keep = (1u64 << left) - 1;
+                m.comma &= keep;
+                m.line &= keep;
+                m.quote &= keep;
+            }
+            *wx.sep.get_unchecked_mut(b + 1) = m.comma | m.line;
+            *wx.line.get_unchecked_mut(b + 1) = m.line;
+            *wx.quote.get_unchecked_mut(b + 1) = m.quote;
+        }
+        // Before the window: a line end. After it: nothing (rows that reach the end are redone).
+        wx.sep[0] = 1 << 63;
+        wx.quote[0] = 0;
+        wx.sep[blocks + 1] = 0;
+        wx.quote[blocks + 1] = 0;
+        std::ptr::write_bytes(is_end, 0, BIT_BYTES);
+        std::ptr::write_bytes(opens, 0, BIT_BYTES);
+        *seps = u32::MAX;
+        let mut last_opens = wx.quote[1] & 1;
+        *is_end = 1;
+        *opens = last_opens as u8;
+        let mut ns = 1usize;
+        // First byte offset and first separator number where a quote rule is broken.
+        let (mut bad_at, mut bad_sep) = (usize::MAX, usize::MAX);
+        let mut last_end = usize::MAX;
+        for b in 1..=blocks {
+            let (s, q, l) = (*wx.sep.get_unchecked(b), *wx.quote.get_unchecked(b), *wx.line.get_unchecked(b));
+            let (s_before, s_after) = (*wx.sep.get_unchecked(b - 1) >> 63, *wx.sep.get_unchecked(b + 1) & 1);
+            let (q_before, q_after) = (*wx.quote.get_unchecked(b - 1) >> 63, *wx.quote.get_unchecked(b + 1) & 1);
+            let opening = q & ((s << 1) | s_before);
+            let closing = q & ((s >> 1) | (s_after << 63));
+            let stray = q & !(opening ^ closing);
+            let n = s.count_ones() as usize;
+            let opens_after = Q::squeeze(s & ((q >> 1) | (q_after << 63)), s);
+            let closed_before = Q::squeeze(s & ((q << 1) | q_before), s);
+            let ends = Q::squeeze(l, s);
+            let low_n = if n == 64 { !0 } else { (1u64 << n) - 1 };
+            let unpaired = (closed_before ^ ((opens_after << 1) | last_opens)) & low_n;
+            if n > 0 {
+                last_opens = (opens_after >> (n - 1)) & 1;
+            }
+            if (stray | unpaired) != 0 {
+                if stray != 0 {
+                    bad_at = bad_at.min((b - 1) * 64 + stray.trailing_zeros() as usize);
+                }
+                if unpaired != 0 {
+                    bad_sep = bad_sep.min(ns + unpaired.trailing_zeros() as usize);
+                }
+            }
+            put_bits(is_end, ns, ends);
+            put_bits(opens, ns, opens_after);
+            offsets(s, ((b - 1) * 64) as u32, seps, &mut ns, 8);
+            if l != 0 {
+                last_end = (b - 1) * 64 + 63 - l.leading_zeros() as usize;
+            }
+        }
+
+        // Rows: `si` is the number of the row's first separator, `row` its offset in the window.
+        let (mut si, mut row) = (1usize, 0usize);
+        let mut general = false;
+        loop {
+            let k = bits_at(is_end, si).trailing_zeros() as usize;
+            if k >= 57 {
+                // No line end within reach: the window's tail, or a row with dozens of commas.
+                general = si + 57 < ns;
+                break;
+            }
+            let end = *seps.add(si + k) as usize;
+            if k == N {
+                if (end >= bad_at) | (si + N >= bad_sep) {
+                    general = true;
+                    break;
+                }
+                let quoted = bits_at(opens, si - 1);
+                let (mut a, mut e) = ([0usize; 8], [0usize; 8]);
+                let mut start = (*seps.add(si - 1)).wrapping_add(1);
+                for j in 0..=N {
+                    let sep = *seps.add(si + j);
+                    let q = (quoted >> j) as u32 & 1;
+                    a[j] = w + (start + q) as usize;
+                    e[j] = w + (sep - q) as usize;
+                    start = sep + 1;
+                }
+                sink.fields(w + row, &a, &e);
+            }
+            si += k + 1;
+            row = end + 1;
+        }
+        if general {
+            let upto = if last_end != usize::MAX && last_end + 1 > row { w + last_end + 1 } else { after_line_end(data, stop, to) };
+            rows_in::<L, R, N>(ix, data, w + row, upto, open_end && upto == to, sink);
+            w = upto;
+        } else if row == 0 {
+            // Not one complete row in the window: a very long row, or the unfinished last row.
+            let upto = if stop == to { to } else { after_line_end(data, stop, to) };
+            rows_in::<L, R, N>(ix, data, w, upto, open_end && upto == to, sink);
+            w = upto;
+        } else {
+            w += row;
+        }
     }
 }
 
@@ -330,20 +564,9 @@ mod tests {
     }
     impl<const N: usize> Rows<N> for Collect<N> {
         unsafe fn window(&mut self, _rows: usize) {}
-        unsafe fn row(&mut self, from: usize, commas: &[usize; N], to: usize, quotes: u32) {
-            let mut f = Fields::new();
-            let mut out = Vec::new();
-            let mut a = from;
-            for k in 0..=N {
-                let mut e = if k < N { commas[k] } else { to };
-                let mut s = a;
-                f.strip(self.data, &mut s, &mut e);
-                out.push((s, e));
-                a = if k < N { commas[k] + 1 } else { to };
-            }
-            if f.sound(quotes) {
-                self.got.push(out.iter().map(|&(s, e)| std::slice::from_raw_parts(self.data.add(s), e - s).to_vec()).collect());
-            }
+        unsafe fn fields(&mut self, from: usize, a: &[usize; 8], e: &[usize; 8]) {
+            assert!(from <= a[0]);
+            self.got.push((0..=N).map(|k| std::slice::from_raw_parts(self.data.add(a[k]), e[k] - a[k]).to_vec()).collect());
         }
     }
 
@@ -363,25 +586,30 @@ mod tests {
         want
     }
 
-    fn check<L: Lens, const N: usize>(text: &[u8]) {
+    fn check<L: Lens, Q: Squeeze, const N: usize>(text: &[u8]) {
         let mut data = text.to_vec();
         let n = data.len();
         data.extend_from_slice(&[b'#'; 200]);
+        let open = n > 0 && data[n - 1] != b'\n';
+        let want = reference::<N>(&data, n);
         let mut ix = Index::new();
         let mut sink = Collect::<N> { data: data.as_ptr(), got: Vec::new() };
-        let open = n > 0 && data[n - 1] != b'\n';
         unsafe { rows_in::<L, _, N>(&mut ix, data.as_ptr(), 0, n, open, &mut sink) };
-        assert_eq!(sink.got, reference::<N>(&data, n), "{:?}", String::from_utf8_lossy(text));
+        assert_eq!(sink.got, want, "general: {:?}", String::from_utf8_lossy(text));
+        let mut wx = Wide::new();
+        let mut sink = Collect::<N> { data: data.as_ptr(), got: Vec::new() };
+        unsafe { rows_wide::<L, Q, _, N>(&mut ix, &mut wx, data.as_ptr(), 0, n, open, &mut sink) };
+        assert_eq!(sink.got, want, "wide: {:?}", String::from_utf8_lossy(text));
     }
 
     fn every_lens<const N: usize>(text: &[u8]) {
-        check::<Words, N>(text);
-        check::<Plain, N>(text);
+        check::<Words, SlowSqueeze, N>(text);
+        check::<Plain, SlowSqueeze, N>(text);
         #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx2") {
-            #[target_feature(enable = "avx2")]
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("bmi2") && is_x86_feature_detected!("popcnt") {
+            #[target_feature(enable = "avx2,bmi1,bmi2,popcnt")]
             unsafe fn go<const N: usize>(text: &[u8]) {
-                check::<Avx, N>(text);
+                check::<Avx, Bmi2, N>(text);
             }
             unsafe { go::<N>(text) };
         }

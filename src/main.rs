@@ -29,7 +29,7 @@ use dedup::{Kept, Suspect, GROUPS};
 use ids::Names;
 use input::{list_csv, open_view, plan_slices};
 use parquet::{ColumnView, TextColumn};
-use parse::{Cells, Ck, Ev, Kind, Piece, Reader, Run, Shared};
+use parse::{Cells, Ck, Ev, Kind, Piece, Reader, Run, Scanner, Shared};
 use people::People;
 use sessions::{Bench, Out, Stage, UserCols};
 use shard::{Deal, Dealt, Hand, Seating};
@@ -117,18 +117,14 @@ macro_rules! lg {
     };
 }
 
-/// True when the AVX2 build of the row reader may run on this CPU.
-fn wide_reader() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let asked = std::env::var("SS_READER").unwrap_or_default();
-        if asked == "plain" {
-            return false;
-        }
-        is_x86_feature_detected!("avx2") && is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("bmi2") && is_x86_feature_detected!("lzcnt") && is_x86_feature_detected!("popcnt")
+/// Which reader to run: (fast build, scanner for the portable build). `SS_READER` can force
+/// the portable build with either scanner (`general` or `wide`), for tests.
+fn reader_choice() -> (bool, Scanner) {
+    match std::env::var("SS_READER").unwrap_or_default().as_str() {
+        "general" => (false, Scanner::General),
+        "wide" => (false, Scanner::Wide),
+        _ => (parse::fast_cpu(), Scanner::General),
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    false
 }
 
 fn run() -> Result<(), String> {
@@ -187,7 +183,7 @@ fn run() -> Result<(), String> {
     }
     let link_pieces = pieces.iter().filter(|p| p.kind == Kind::Links).count();
     let links_left = AtomicUsize::new(link_pieces);
-    let wide = wide_reader();
+    let (fast, scanner) = reader_choice();
     let readers: Each<Reader> = Each::new(threads, Reader::new);
     let pair_lists: Each<Vec<[u32; 2]>> = Each::new(threads, Vec::new);
     let joined: Mutex<Option<People>> = Mutex::new(if link_pieces == 0 { Some(People::join(&names, &[])) } else { None });
@@ -202,14 +198,14 @@ fn run() -> Result<(), String> {
             }
             let piece = &pieces[i];
             if piece.kind == Kind::Links {
-                parse::read(&sh, reader, unsafe { pair_lists.item(w) }, piece, wide);
+                parse::read(&sh, reader, unsafe { pair_lists.item(w) }, piece, fast, scanner);
                 if links_left.fetch_sub(1, Ordering::SeqCst) == 1 {
                     // Every link row is read: join them while the others read events.
                     let lists: Vec<&[[u32; 2]]> = (0..threads).map(|t| unsafe { &pair_lists.item(t)[..] }).collect();
                     *joined.lock().unwrap() = Some(People::join(&names, &lists));
                 }
             } else {
-                parse::read(&sh, reader, &mut Vec::new(), piece, wide);
+                parse::read(&sh, reader, &mut Vec::new(), piece, fast, scanner);
             }
         }
     });

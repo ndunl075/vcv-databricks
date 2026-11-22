@@ -12,7 +12,7 @@
 
 use crate::ids::{key_of, spread, word, Key, Names, Supply, Table, LOW_BYTES};
 use crate::os;
-use crate::scan::{rows_in, Fields, Index, Lens, Plain, Rows};
+use crate::scan::{rows_in, rows_wide, Index, Lens, Plain, Rows, SlowSqueeze, Squeeze, Wide};
 use crate::stamp::{Dates, NEVER};
 use crate::tables::{Campaigns, Products, Window};
 use crate::ts::price_cents;
@@ -124,6 +124,7 @@ const BLOCK: usize = (8 << 20) / 24;
 /// One thread's scratch and output for the reading stage.
 pub struct Reader {
     ix: Index,
+    wx: Wide,
     dates: Dates,
     supply: Supply,
     ev_free: *mut Ev,
@@ -138,6 +139,7 @@ impl Reader {
     pub fn new() -> Reader {
         Reader {
             ix: Index::new(),
+            wx: Wide::new(),
             dates: Dates::new(),
             supply: Supply::new(),
             ev_free: std::ptr::null_mut(),
@@ -282,27 +284,14 @@ impl Rows<6> for EventRows<'_, '_> {
     }
 
     #[inline(always)]
-    unsafe fn row(&mut self, from: usize, c: &[usize; 6], to: usize, quotes: u32) {
+    unsafe fn fields(&mut self, from: usize, a: &[usize; 8], e: &[usize; 8]) {
         if SKIP & 1 != 0 {
             return;
         }
         let d = self.data;
-        let mut f = Fields::new();
-        let (mut a0, mut e0) = (from, c[0]);
-        let (mut a1, mut e1) = (c[0] + 1, c[1]);
-        let (mut a2, mut e2) = (c[1] + 1, c[2]);
-        let (mut a3, mut e3) = (c[2] + 1, c[3]);
-        let (mut a4, mut e4) = (c[3] + 1, c[4]);
-        let (mut a5, mut e5) = (c[4] + 1, c[5]);
-        let (mut a6, mut e6) = (c[5] + 1, to);
-        f.strip(d, &mut a0, &mut e0);
-        f.strip(d, &mut a1, &mut e1);
-        f.strip(d, &mut a2, &mut e2);
-        f.strip(d, &mut a3, &mut e3);
-        f.strip(d, &mut a4, &mut e4);
-        f.strip(d, &mut a5, &mut e5);
-        f.strip(d, &mut a6, &mut e6);
-        if !f.sound(quotes) | (a0 == e0) | (SKIP & 2 != 0) {
+        let (a0, a1, a2, a3, a4, a5, a6) = (a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
+        let (e0, e1, e2, e3, e4, e5, e6) = (e[0], e[1], e[2], e[3], e[4], e[5], e[6]);
+        if (a0 == e0) | (SKIP & 2 != 0) {
             return;
         }
         let sh = self.fl.sh;
@@ -387,18 +376,11 @@ impl Rows<3> for ClickRows<'_, '_> {
     }
 
     #[inline(always)]
-    unsafe fn row(&mut self, from: usize, c: &[usize; 3], to: usize, quotes: u32) {
+    unsafe fn fields(&mut self, _from: usize, a: &[usize; 8], e: &[usize; 8]) {
         let d = self.data;
-        let mut f = Fields::new();
-        let (mut a0, mut e0) = (from, c[0]);
-        let (mut a1, mut e1) = (c[0] + 1, c[1]);
-        let (mut a2, mut e2) = (c[1] + 1, c[2]);
-        let (mut a3, mut e3) = (c[2] + 1, to);
-        f.strip(d, &mut a0, &mut e0);
-        f.strip(d, &mut a1, &mut e1);
-        f.strip(d, &mut a2, &mut e2);
-        f.strip(d, &mut a3, &mut e3);
-        if !f.sound(quotes) | (a0 == e0) | (a1 == e1) {
+        let (a0, a1, a2, a3) = (a[0], a[1], a[2], a[3]);
+        let (e0, e1, e2, e3) = (e[0], e[1], e[2], e[3]);
+        if (a0 == e0) | (a1 == e1) {
             return;
         }
         let sh = self.fl.sh;
@@ -441,14 +423,10 @@ impl Rows<1> for LinkRows<'_, '_> {
     }
 
     #[inline(always)]
-    unsafe fn row(&mut self, from: usize, c: &[usize; 1], to: usize, quotes: u32) {
+    unsafe fn fields(&mut self, _from: usize, a: &[usize; 8], e: &[usize; 8]) {
         let d = self.data;
-        let mut f = Fields::new();
-        let (mut a0, mut e0) = (from, c[0]);
-        let (mut a1, mut e1) = (c[0] + 1, to);
-        f.strip(d, &mut a0, &mut e0);
-        f.strip(d, &mut a1, &mut e1);
-        if !f.sound(quotes) | (a0 == e0) | (a1 == e1) {
+        let (a0, a1, e0, e1) = (a[0], a[1], e[0], e[1]);
+        if (a0 == e0) | (a1 == e1) {
             return;
         }
         let n = self.pairs.len();
@@ -479,13 +457,30 @@ pub struct Piece {
     pub to: usize,
 }
 
+/// How rows are found: the general scanner, or the one built around `pext`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Scanner {
+    General,
+    Wide,
+}
+
 #[inline(always)]
-unsafe fn read_with<L: Lens>(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece) {
+unsafe fn scan<L: Lens, Q: Squeeze, R: Rows<N>, const N: usize>(wide: bool, ix: &mut Index, wx: &mut Wide, p: &Piece, rows: &mut R) {
+    let data = p.data.as_ptr();
+    let open_end = p.to == p.data.len() && p.data[p.to - 1] != b'\n';
+    if wide {
+        rows_wide::<L, Q, R, N>(ix, wx, data, p.from, p.to, open_end, rows);
+    } else {
+        rows_in::<L, R, N>(ix, data, p.from, p.to, open_end, rows);
+    }
+}
+
+#[inline(always)]
+unsafe fn read_with<L: Lens, Q: Squeeze>(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, wide: bool) {
     if p.from >= p.to {
         return;
     }
     let data = p.data.as_ptr();
-    let open_end = p.to == p.data.len() && p.data[p.to - 1] != b'\n';
     match p.kind {
         Kind::Events => {
             let mut rows = EventRows {
@@ -499,43 +494,56 @@ unsafe fn read_with<L: Lens>(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 
                 run_first: r.ev_free,
                 run_base: p.from,
             };
-            rows_in::<L, _, 6>(&mut r.ix, data, p.from, p.to, open_end, &mut rows);
+            scan::<L, Q, _, 6>(wide, &mut r.ix, &mut r.wx, p, &mut rows);
             rows.fl.close(rows.supply);
             rows.end_run();
-            r.ev_free = rows.free;
-            r.ev_left = rows.left;
+            let (free, left) = (rows.free, rows.left);
+            r.ev_free = free;
+            r.ev_left = left;
         }
         Kind::Clicks => {
             let mut rows = ClickRows { fl: Flight::new(sh), data, dates: &mut r.dates, supply: &mut r.supply, runs: &mut r.ck_runs, free: r.ck_free, left: r.ck_left, run_first: r.ck_free };
-            rows_in::<L, _, 3>(&mut r.ix, data, p.from, p.to, open_end, &mut rows);
+            scan::<L, Q, _, 3>(wide, &mut r.ix, &mut r.wx, p, &mut rows);
             rows.fl.close(rows.supply);
             rows.end_run();
-            r.ck_free = rows.free;
-            r.ck_left = rows.left;
+            let (free, left) = (rows.free, rows.left);
+            r.ck_free = free;
+            r.ck_left = left;
         }
         Kind::Links => {
             let mut rows = LinkRows { fl: Flight::new(sh), data, supply: &mut r.supply, pairs };
-            rows_in::<L, _, 1>(&mut r.ix, data, p.from, p.to, open_end, &mut rows);
+            scan::<L, Q, _, 1>(wide, &mut r.ix, &mut r.wx, p, &mut rows);
             rows.fl.close(rows.supply);
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,lzcnt,popcnt")]
-unsafe fn read_wide(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece) {
-    read_with::<crate::scan::Avx>(sh, r, pairs, p)
+#[target_feature(enable = "avx2,bmi1,bmi2,popcnt")]
+unsafe fn read_fast(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece) {
+    read_with::<crate::scan::Avx, crate::scan::Bmi2>(sh, r, pairs, p, true)
 }
 
-/// Reads one piece. `wide` selects the AVX2 build of the reader; the caller has checked the CPU.
-pub fn read(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, wide: bool) {
+/// True when this CPU can run the fast build of the reader (AVX2, BMI1, BMI2, POPCNT).
+pub fn fast_cpu() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        is_x86_feature_detected!("avx2") && is_x86_feature_detected!("bmi1") && is_x86_feature_detected!("bmi2") && is_x86_feature_detected!("popcnt")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
+/// Reads one piece. `fast` (only after `fast_cpu()` said yes) runs the AVX2 + BMI2 build of the
+/// wide scanner; otherwise `scanner` picks the algorithm for the build every CPU can run.
+pub fn read(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, fast: bool, scanner: Scanner) {
     // SAFETY: pieces lie inside mapped files, which carry a readable zero tail.
     unsafe {
         #[cfg(target_arch = "x86_64")]
-        if wide {
-            return read_wide(sh, r, pairs, p);
+        if fast {
+            return read_fast(sh, r, pairs, p);
         }
-        let _ = wide;
-        read_with::<Plain>(sh, r, pairs, p)
+        let _ = fast;
+        read_with::<Plain, SlowSqueeze>(sh, r, pairs, p, scanner == Scanner::Wide)
     }
 }

@@ -2,6 +2,8 @@
 # Exactness gate on native builds: unit tests, fixtures, dev set, the OOD differential sets and
 # the two 20M sets against their oracle tables.  Usage: tests/gate.sh [quick]
 # quick: skips cargo test and the 20M sets.  Prints one line per check and a final verdict.
+# SS_READER=wide (or general) in the environment picks the scanner of the portable reader; run the
+# gate once with each to cover both scanners on a machine without the fast x86 build.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH=$HOME/.cargo/bin:$PATH
