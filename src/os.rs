@@ -38,21 +38,28 @@ fn fail(what: &str) -> ! {
     std::process::exit(1)
 }
 
-/// `bytes` of zeroed, writable memory that lives until the process ends. Large regions ask for
-/// huge pages where the system offers them on request.
+/// Regions at least this large start on a huge-page boundary.
+const BIG: usize = 2 << 20;
+
+/// `bytes` of zeroed, writable memory that lives until the process ends. Large regions start on
+/// a 2 MB boundary and ask for huge pages where the system offers them on request.
 pub fn zeroed(bytes: usize) -> *mut u8 {
     let bytes = bytes.max(1).next_multiple_of(TAIL);
+    let big = bytes >= BIG;
+    let span = if big { bytes.next_multiple_of(BIG) + BIG } else { bytes };
     // SAFETY: a fresh private anonymous mapping.
     unsafe {
-        let p = sys::region(std::ptr::null_mut(), bytes, sys::CAN_READ | sys::CAN_WRITE, sys::OWN_COPY | sys::NO_FILE, -1, 0);
+        let p = sys::region(std::ptr::null_mut(), span, sys::CAN_READ | sys::CAN_WRITE, sys::OWN_COPY | sys::NO_FILE, -1, 0);
         if p as isize == -1 {
             fail("memory region");
         }
-        #[cfg(target_os = "linux")]
-        if bytes >= 4 << 20 {
-            sys::advise(p, bytes, sys::BIG_PAGES);
+        if !big {
+            return p as *mut u8;
         }
-        p as *mut u8
+        let start = (p as usize).next_multiple_of(BIG) as *mut c_void;
+        #[cfg(target_os = "linux")]
+        sys::advise(start, span - BIG, sys::BIG_PAGES);
+        start as *mut u8
     }
 }
 

@@ -25,7 +25,7 @@ mod ts;
 mod util;
 
 use acc::CampAcc;
-use dedup::{Kept, Suspect, GROUPS};
+use dedup::{Desk, Suspect, GROUPS};
 use ids::Names;
 use input::{list_csv, open_view, plan_slices};
 use parquet::{ColumnView, TextColumn};
@@ -89,7 +89,6 @@ unsafe impl<T> Send for Run<T> {}
 unsafe impl<T> Sync for Run<T> {}
 unsafe impl Send for Suspect {}
 unsafe impl Sync for Suspect {}
-unsafe impl Send for Kept {}
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     PathBuf::from(std::env::var(name).unwrap_or_else(|_| default.to_string()))
@@ -181,6 +180,41 @@ fn run() -> Result<(), String> {
             }
         }
     }
+    if parse::SKIP == 64 {
+        // Timing experiment: each layer of the event reader on one thread, on the largest file.
+        let data = ev_files.first().copied().unwrap_or(&[]);
+        let from = input::first_row(data);
+        let mut to = data.len().min(256 << 20);
+        while to > from && data[to - 1] != b'\n' {
+            to -= 1;
+        }
+        let mut reader = Reader::new();
+        let (fast, scanner) = reader_choice();
+        let ms = |f: &mut dyn FnMut() -> usize| {
+            let t = Instant::now();
+            let n = f();
+            (t.elapsed().as_secs_f64() * 1e3, n)
+        };
+        let mut line = format!("bench mb={}", (to - from) >> 20);
+        for (name, what) in [("touch", 0u32), ("touch", 0), ("marks", 1), ("gen", 2), ("gen", 2), ("wide", 3), ("wide", 3)] {
+            let (t, n) = ms(&mut || parse::layer(what, &mut reader, data, from, to, fast));
+            line.push_str(&format!(" {name}={t:.0}"));
+            if what == 2 {
+                line.push_str(&format!("/{}k", n / 1000));
+            }
+        }
+        for (name, f, sc) in [("readw", fast, Scanner::Wide), ("readw", fast, Scanner::Wide), ("readg", false, Scanner::General), ("readslow", false, Scanner::Wide)] {
+            let piece = Piece { kind: Kind::Events, data, from, to };
+            let (t, _) = ms(&mut || {
+                parse::read(&sh, &mut reader, &mut Vec::new(), &piece, f, sc);
+                0
+            });
+            line.push_str(&format!(" {name}={t:.0}"));
+        }
+        let _ = scanner;
+        eprintln!("stages {line}");
+        return Ok(());
+    }
     let link_pieces = pieces.iter().filter(|p| p.kind == Kind::Links).count();
     let links_left = AtomicUsize::new(link_pieces);
     let (fast, scanner) = reader_choice();
@@ -265,7 +299,7 @@ fn run() -> Result<(), String> {
     let suspects: usize = par(threads, |w| {
         // SAFETY: worker `w` owns hand `w`.
         let events = unsafe { &mut hands.item(w).events };
-        let mut table: Vec<Kept> = Vec::new();
+        let mut desk = Desk::default();
         let mut dates = Dates::new();
         let mut seen = 0usize;
         loop {
@@ -277,7 +311,7 @@ fn run() -> Result<(), String> {
             seen += lists.iter().map(|l| l.len()).sum::<usize>();
             // SAFETY: suspects point at live records and rows; survivors are valid when `who` is set.
             unsafe {
-                dedup::settle(&lists, &mut table, &mut dates, |rec| {
+                dedup::settle(&lists, &mut desk, &mut dates, |rec| {
                     if (*rec).who != parse::NOBODY {
                         deal.event(&*rec, events);
                     }
@@ -331,7 +365,7 @@ fn run() -> Result<(), String> {
 
     let next = AtomicUsize::new(0);
     let results: Vec<Result<CampAcc, String>> = par(threads, |w| {
-        let mut out = Out { users: UserCols::default(), acc: CampAcc::new(ncamp, day0, ndays) };
+        let mut out = Out { users: UserCols::with_room(ev_total / threads / 5 + 1024), acc: CampAcc::new(ncamp, day0, ndays) };
         let mut bench = Bench::default();
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);

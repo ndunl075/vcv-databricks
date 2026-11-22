@@ -22,6 +22,20 @@ pub struct UserCols {
     pub top: MaybeTextColumn,
 }
 
+impl UserCols {
+    /// Columns with room for about `rows` rows before anything has to move.
+    pub fn with_room(rows: usize) -> UserCols {
+        UserCols {
+            user: TextColumn::with_room(rows, 20),
+            day: Vec::with_capacity(rows),
+            sessions: Vec::with_capacity(rows),
+            events: Vec::with_capacity(rows),
+            revenue: Vec::with_capacity(rows),
+            top: MaybeTextColumn::with_room(rows, 4),
+        }
+    }
+}
+
 pub struct Out {
     pub users: UserCols,
     pub acc: CampAcc,

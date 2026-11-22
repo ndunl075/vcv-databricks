@@ -18,6 +18,10 @@ pub struct TextColumn {
 }
 
 impl TextColumn {
+    /// Room for `rows` values of about `bytes_each` bytes.
+    pub fn with_room(rows: usize, bytes_each: usize) -> TextColumn {
+        TextColumn { bytes: Vec::with_capacity(rows * bytes_each), page_starts: Vec::new(), rows: 0 }
+    }
     #[inline]
     pub fn push(&mut self, v: &[u8]) {
         if self.rows % ROWS_PER_PAGE == 0 {
@@ -38,6 +42,10 @@ pub struct MaybeTextColumn {
 }
 
 impl MaybeTextColumn {
+    /// Room for `rows` rows whose values take about `bytes_each` bytes on average.
+    pub fn with_room(rows: usize, bytes_each: usize) -> MaybeTextColumn {
+        MaybeTextColumn { bytes: Vec::with_capacity(rows * bytes_each), page_starts: Vec::new(), present: Vec::with_capacity(rows) }
+    }
     #[inline]
     pub fn push(&mut self, v: Option<&[u8]>) {
         if self.present.len() % ROWS_PER_PAGE == 0 {

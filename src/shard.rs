@@ -268,7 +268,7 @@ pub unsafe fn sweep_events(run: &Run<Ev>, cells: &Cells, deal: &Deal, h: &mut Ha
             }
         }
         if cells.crowded(r.tag) {
-            h.suspects.get_unchecked_mut(group_of(r.tag)).push(Suspect { rec: run.first.add(i), row: run.base.add(r.at as usize) });
+            h.suspects.get_unchecked_mut(group_of(r.tag)).push(Suspect { rec: run.first.add(i), row: run.base.add(r.at as usize), tag: r.tag });
         } else if r.who != NOBODY {
             deal.event(r, &mut h.events);
         }

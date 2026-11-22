@@ -5,7 +5,7 @@ CPUS     ?= 8
 MEM      ?= 24g
 VENV     ?= $(HOME)/Developer/vcv-data/venv
 PY       ?= $(if $(wildcard $(VENV)/bin/python),$(VENV)/bin/python,python3)
-DEV      ?= $(HOME)/Developer/vcv-data/db/dev
+DEV      ?= $(HOME)/Developer/vcv-data/db/v5/dev
 ANSWER   ?= kit/dev-answer/dev-answer
 # Colima/Docker Desktop only share $HOME with containers, so temp dirs must live under it.
 TMPDIR   = $(HOME)/Developer/vcv-data/tmp

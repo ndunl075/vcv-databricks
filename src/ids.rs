@@ -85,6 +85,49 @@ pub fn spread(k: &Key) -> u64 {
     fold(x ^ k[2] ^ 0x1656_67b1_9e37_79f9, 0xd6e8_feb8_6659_fd93)
 }
 
+/// Longest ID that is its own key in the wide table.
+pub const WIDE: usize = 55;
+
+/// Key of an ID of 24 to 55 bytes: the bytes, zero padded, with the length in the last byte.
+pub type WideKey = [u64; 7];
+
+/// # Safety
+/// `n <= WIDE`, and the 56 bytes at `p` must be readable (inputs carry a zero tail).
+#[inline(always)]
+pub unsafe fn wide_key_of(p: *const u8, n: usize) -> WideKey {
+    let mut k = [0u64; 7];
+    for (w, slot) in k.iter_mut().enumerate() {
+        let have = n.saturating_sub(w * 8).min(8);
+        *slot = word(p.add(w * 8)) & *LOW_BYTES.get_unchecked(have);
+    }
+    k[6] |= (n as u64) << 56;
+    k
+}
+
+/// 64 well-mixed bits of a wide key.
+#[inline(always)]
+pub fn spread_wide(k: &WideKey) -> u64 {
+    let a = fold(k[0] ^ 0x9e37_79b9_7f4a_7c15, k[1] ^ 0xc2b2_ae3d_27d4_eb4f);
+    let b = fold(k[2] ^ 0x1656_67b1_9e37_79f9, k[3] ^ 0x27d4_eb2f_1656_67c5);
+    let c = fold(k[4] ^ 0x8ebc_6af0_9c88_c6e3, k[5] ^ 0x5899_65cc_7537_4cc3);
+    fold(a ^ b.rotate_left(23) ^ c.rotate_left(41) ^ k[6], 0xd6e8_feb8_6659_fd93)
+}
+
+/// A hash of the `n` bytes at `p`: equal strings give equal hashes.
+///
+/// # Safety
+/// As `key_of` and `wide_key_of`.
+#[inline(always)]
+pub unsafe fn hash_of(p: *const u8, n: usize) -> u64 {
+    if n <= INLINE {
+        spread(&key_of(p, n))
+    } else if n <= WIDE {
+        spread_wide(&wide_key_of(p, n))
+    } else {
+        spread(&long_key(p, n))
+    }
+}
+
 /// An ID's text: its first 16 bytes (zero padded) kept here, and where all of it lives.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -124,6 +167,13 @@ struct Cell {
     state: AtomicU64,
 }
 
+#[repr(C, align(64))]
+struct WideCell {
+    key: WideKey,
+    /// As `Cell::state`.
+    state: AtomicU64,
+}
+
 const NUMBERS_PER_GRAB: u32 = 1024;
 const PAGE_BITS: u32 = 16;
 const PAGES: usize = 1 << (32 - PAGE_BITS);
@@ -134,6 +184,10 @@ pub struct Names {
     /// Readers hold this shared while they use `cells`; growing takes it exclusively.
     pub gate: RwLock<()>,
     used: AtomicUsize,
+    /// The same again for IDs of 24 to 55 bytes, which need wider cells.
+    wide_cells: AtomicPtr<WideCell>,
+    wide_bits: AtomicU32,
+    wide_used: AtomicUsize,
     pub grow_wanted: AtomicBool,
     next: AtomicU32,
     pages: Box<[AtomicPtr<Text>]>,
@@ -150,6 +204,10 @@ pub struct Table {
     shift: u32,
     mask: usize,
     full_at: usize,
+    wide_cells: *mut WideCell,
+    wide_shift: u32,
+    wide_mask: usize,
+    wide_full_at: usize,
 }
 
 /// One thread's supply of unused numbers.
@@ -157,11 +215,12 @@ pub struct Supply {
     next: u32,
     end: u32,
     pub fresh: usize,
+    fresh_wide: usize,
 }
 
 impl Supply {
     pub fn new() -> Supply {
-        Supply { next: 0, end: 0, fresh: 0 }
+        Supply { next: 0, end: 0, fresh: 0, fresh_wide: 0 }
     }
 }
 
@@ -169,11 +228,15 @@ impl Names {
     pub fn new(expected: usize, threads: usize) -> Names {
         let want = (expected * 2).max(1 << 18).max(threads << 16).next_power_of_two();
         let bits = want.trailing_zeros();
+        let wide_bits = bits.saturating_sub(3).max(16);
         Names {
             cells: AtomicPtr::new(os::zeroed_array::<Cell>(want)),
             bits: AtomicU32::new(bits),
             gate: RwLock::new(()),
             used: AtomicUsize::new(0),
+            wide_cells: AtomicPtr::new(os::zeroed_array::<WideCell>(1 << wide_bits)),
+            wide_bits: AtomicU32::new(wide_bits),
+            wide_used: AtomicUsize::new(0),
             grow_wanted: AtomicBool::new(false),
             next: AtomicU32::new(0),
             pages: (0..PAGES).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect(),
@@ -183,7 +246,17 @@ impl Names {
     /// Call with the gate held shared.
     pub fn table(&self) -> Table {
         let bits = self.bits.load(Acquire);
-        Table { cells: self.cells.load(Acquire), shift: 64 - bits, mask: (1usize << bits) - 1, full_at: 1usize << (bits - 1) }
+        let wb = self.wide_bits.load(Acquire);
+        Table {
+            cells: self.cells.load(Acquire),
+            shift: 64 - bits,
+            mask: (1usize << bits) - 1,
+            full_at: 1usize << (bits - 1),
+            wide_cells: self.wide_cells.load(Acquire),
+            wide_shift: 64 - wb,
+            wide_mask: (1usize << wb) - 1,
+            wide_full_at: 1usize << (wb - 1),
+        }
     }
 
     /// One more than the largest number handed out so far.
@@ -216,7 +289,7 @@ impl Names {
         s.end = first + NUMBERS_PER_GRAB;
     }
 
-    /// Adds this thread's new IDs to the shared total; true when the table should grow.
+    /// Adds this thread's new IDs to the shared totals; true when a table should grow.
     #[inline]
     pub fn report(&self, s: &mut Supply, t: &Table) -> bool {
         let total = if s.fresh > 0 {
@@ -226,26 +299,31 @@ impl Names {
         } else {
             self.used.load(Relaxed)
         };
-        total > t.full_at || self.grow_wanted.load(Relaxed)
+        let wide = if s.fresh_wide > 0 {
+            let n = self.wide_used.fetch_add(s.fresh_wide, Relaxed) + s.fresh_wide;
+            s.fresh_wide = 0;
+            n
+        } else {
+            self.wide_used.load(Relaxed)
+        };
+        (total > t.full_at) | (wide > t.wide_full_at) | self.grow_wanted.load(Relaxed)
     }
 
-    /// Doubles the table until it is at most a quarter full. Call without holding the gate.
+    /// Grows whichever table is more than half full until it is at most a quarter full.
+    /// Call without holding the gate.
     #[cold]
     pub fn grow(&self) {
         self.grow_wanted.store(true, SeqCst);
         let _all = self.gate.write().unwrap();
-        let bits = self.bits.load(Acquire);
-        let used = self.used.load(SeqCst);
-        if used > 1usize << (bits - 1) {
-            let mut nb = bits + 1;
-            while used > 1usize << (nb - 2) {
-                nb += 1;
-            }
-            let old = self.cells.load(Acquire);
-            let new = os::zeroed_array::<Cell>(1usize << nb);
-            let mask = (1usize << nb) - 1;
-            // SAFETY: exclusive access; every old cell is free or complete.
-            unsafe {
+        // SAFETY: exclusive access; every cell is free or complete.
+        unsafe {
+            let bits = self.bits.load(Acquire);
+            let used = self.used.load(SeqCst);
+            if used > 1usize << (bits - 1) {
+                let nb = roomy(bits, used);
+                let old = self.cells.load(Acquire);
+                let new = os::zeroed_array::<Cell>(1usize << nb);
+                let mask = (1usize << nb) - 1;
                 for i in 0..1usize << bits {
                     let c = &*old.add(i);
                     let st = c.state.load(Relaxed);
@@ -259,12 +337,44 @@ impl Names {
                     }
                 }
                 os::release(old as *const u8, (1usize << bits) * std::mem::size_of::<Cell>());
+                self.cells.store(new, Release);
+                self.bits.store(nb, Release);
             }
-            self.cells.store(new, Release);
-            self.bits.store(nb, Release);
+            let bits = self.wide_bits.load(Acquire);
+            let used = self.wide_used.load(SeqCst);
+            if used > 1usize << (bits - 1) {
+                let nb = roomy(bits, used);
+                let old = self.wide_cells.load(Acquire);
+                let new = os::zeroed_array::<WideCell>(1usize << nb);
+                let mask = (1usize << nb) - 1;
+                for i in 0..1usize << bits {
+                    let c = &*old.add(i);
+                    let st = c.state.load(Relaxed);
+                    if st >= 2 {
+                        let mut j = (spread_wide(&c.key) >> (64 - nb)) as usize;
+                        while (*new.add(j)).state.load(Relaxed) != 0 {
+                            j = (j + 1) & mask;
+                        }
+                        (*new.add(j)).key = c.key;
+                        (*new.add(j)).state.store(st, Relaxed);
+                    }
+                }
+                os::release(old as *const u8, (1usize << bits) * std::mem::size_of::<WideCell>());
+                self.wide_cells.store(new, Release);
+                self.wide_bits.store(nb, Release);
+            }
         }
         self.grow_wanted.store(false, SeqCst);
     }
+}
+
+/// Table size (as a power of two) that leaves `used` cells at most a quarter of it.
+fn roomy(bits: u32, used: usize) -> u32 {
+    let mut nb = bits + 1;
+    while used > 1usize << (nb - 2) {
+        nb += 1;
+    }
+    nb
 }
 
 impl Table {
@@ -310,6 +420,80 @@ impl Table {
             } else {
                 std::hint::spin_loop();
             }
+        }
+    }
+
+    /// As `number`, for an ID of 24 to `WIDE` bytes; its key is rebuilt from the bytes.
+    ///
+    /// # Safety
+    /// As `number`; `h` must be `spread_wide` of the ID's wide key.
+    #[inline(always)]
+    unsafe fn number_wide(&self, names: &Names, s: &mut Supply, h: u64, at: *const u8, len: usize) -> u32 {
+        let k = wide_key_of(at, len);
+        let mut i = (h >> self.wide_shift) as usize;
+        loop {
+            let c = self.wide_cells.add(i);
+            let st = (*c).state.load(Acquire);
+            if st >= 2 {
+                if (*c).key == k {
+                    return (st - 2) as u32;
+                }
+                i = (i + 1) & self.wide_mask;
+            } else if st == 0 {
+                if (*c).state.compare_exchange(0, 1, AcqRel, Acquire).is_ok() {
+                    if s.next == s.end {
+                        names.refill(s);
+                    }
+                    let id = s.next;
+                    s.next += 1;
+                    s.fresh_wide += 1;
+                    std::ptr::addr_of_mut!((*c).key).write(k);
+                    let mut first = [0u8; 16];
+                    std::ptr::copy_nonoverlapping(at, first.as_mut_ptr(), 16);
+                    names.text(id).write(Text { at, len: len as u32, first });
+                    (*c).state.store(id as u64 + 2, Release);
+                    return id;
+                }
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Starts the lookup of the ID `at..at+len`: its hash, its key when it has a narrow one, and
+    /// a request for the cache line the lookup will read. `finish` completes it.
+    ///
+    /// # Safety
+    /// As `key_of` and `wide_key_of`.
+    #[inline(always)]
+    pub unsafe fn begin(&self, at: *const u8, len: usize) -> (Key, u64) {
+        if len <= INLINE {
+            let k = key_of(at, len);
+            let h = spread(&k);
+            self.warm(h);
+            (k, h)
+        } else if len <= WIDE {
+            let h = spread_wide(&wide_key_of(at, len));
+            os::soon(self.wide_cells.add((h >> self.wide_shift) as usize));
+            ([0; 3], h)
+        } else {
+            let k = long_key(at, len);
+            let h = spread(&k);
+            self.warm(h);
+            (k, h)
+        }
+    }
+
+    /// The ID's number, given what `begin` returned for the same bytes.
+    ///
+    /// # Safety
+    /// As `number`.
+    #[inline(always)]
+    pub unsafe fn finish(&self, names: &Names, s: &mut Supply, k: &Key, h: u64, at: *const u8, len: usize) -> u32 {
+        if (len <= INLINE) | (len > WIDE) {
+            self.number(names, s, k, h, at, len)
+        } else {
+            self.number_wide(names, s, h, at, len)
         }
     }
 }
@@ -363,22 +547,22 @@ mod tests {
     fn numbers_are_stable_and_distinct() {
         let names = Names::new(4, 1);
         let mut supply = Supply::new();
-        let pool: Vec<Vec<u8>> = (0..5000).map(|i| padded(format!("user-{i}-{}", "x".repeat(i % 40)).as_bytes())).collect();
+        let pool: Vec<Vec<u8>> = (0..5000).map(|i| padded(format!("user-{i}-{}", "x".repeat(i % 70)).as_bytes())).collect();
         let lens: Vec<usize> = pool.iter().map(|p| p.len() - 64).collect();
         let _g = names.gate.read().unwrap();
         let t = names.table();
         let mut got = Vec::new();
         for (p, &n) in pool.iter().zip(&lens) {
-            let k = unsafe { key_of(p.as_ptr(), n) };
-            got.push(unsafe { t.number(&names, &mut supply, &k, spread(&k), p.as_ptr(), n) });
+            let (k, h) = unsafe { t.begin(p.as_ptr(), n) };
+            got.push(unsafe { t.finish(&names, &mut supply, &k, h, p.as_ptr(), n) });
         }
         let mut uniq = got.clone();
         uniq.sort_unstable();
         uniq.dedup();
         assert_eq!(uniq.len(), pool.len());
         for (i, (p, &n)) in pool.iter().zip(&lens).enumerate() {
-            let k = unsafe { key_of(p.as_ptr(), n) };
-            assert_eq!(unsafe { t.number(&names, &mut supply, &k, spread(&k), p.as_ptr(), n) }, got[i]);
+            let (k, h) = unsafe { t.begin(p.as_ptr(), n) };
+            assert_eq!(unsafe { t.finish(&names, &mut supply, &k, h, p.as_ptr(), n) }, got[i]);
             assert_eq!(unsafe { (*names.text(got[i])).bytes() }, &p[..n]);
         }
     }
@@ -387,7 +571,7 @@ mod tests {
     fn growing_keeps_every_number() {
         let names = Names::new(4, 1);
         let mut supply = Supply::new();
-        let pool: Vec<Vec<u8>> = (0..400_000).map(|i| padded(format!("g{i}").as_bytes())).collect();
+        let pool: Vec<Vec<u8>> = (0..400_000).map(|i| padded(if i % 3 == 0 { format!("g{i}-0123456789abcdef0123456789abcdef") } else { format!("g{i}") }.as_bytes())).collect();
         let mut got = Vec::new();
         for chunk in pool.chunks(1000) {
             {
@@ -395,8 +579,8 @@ mod tests {
                 let t = names.table();
                 for p in chunk {
                     let n = p.len() - 64;
-                    let k = unsafe { key_of(p.as_ptr(), n) };
-                    got.push(unsafe { t.number(&names, &mut supply, &k, spread(&k), p.as_ptr(), n) });
+                    let (k, h) = unsafe { t.begin(p.as_ptr(), n) };
+                    got.push(unsafe { t.finish(&names, &mut supply, &k, h, p.as_ptr(), n) });
                 }
                 if !names.report(&mut supply, &t) {
                     continue;
@@ -406,12 +590,17 @@ mod tests {
         }
         let _g = names.gate.read().unwrap();
         let t = names.table();
-        assert!(t.mask + 1 > 1 << 18);
+        assert!(t.mask + 1 > 1 << 18 && t.wide_mask + 1 > 1 << 16);
         for (i, p) in pool.iter().enumerate() {
             let n = p.len() - 64;
-            let k = unsafe { key_of(p.as_ptr(), n) };
-            assert_eq!(unsafe { t.number(&names, &mut supply, &k, spread(&k), p.as_ptr(), n) }, got[i]);
+            let (k, h) = unsafe { t.begin(p.as_ptr(), n) };
+            assert_eq!(unsafe { t.finish(&names, &mut supply, &k, h, p.as_ptr(), n) }, got[i]);
+            assert_eq!(unsafe { (*names.text(got[i])).bytes() }, &p[..n]);
         }
+        let mut uniq = got.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), pool.len());
     }
 
     #[test]

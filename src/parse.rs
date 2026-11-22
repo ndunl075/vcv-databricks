@@ -10,7 +10,7 @@
 //! far apart, so each row's lookups are started (address computed, cache line requested) and
 //! finished a few rows later, when the memory has arrived.
 
-use crate::ids::{key_of, spread, word, Key, Names, Supply, Table, LOW_BYTES};
+use crate::ids::{hash_of, word, Key, Names, Supply, Table, LOW_BYTES};
 use crate::os;
 use crate::scan::{rows_in, rows_wide, Index, Lens, Plain, Rows, SlowSqueeze, Squeeze, Wide};
 use crate::stamp::{Dates, NEVER};
@@ -191,18 +191,17 @@ impl<'a> Flight<'a> {
             self.sh.cells.mark(p.tag);
         }
         if !p.into.is_null() {
-            *p.into = self.table.number(self.sh.names, supply, &p.key, p.hash, p.at, p.len);
+            *p.into = self.table.finish(self.sh.names, supply, &p.key, p.hash, p.at, p.len);
         }
     }
 
     #[inline(always)]
     unsafe fn push(&mut self, supply: &mut Supply, p: Pending) {
-        let slot = self.pushed & (LAG - 1);
+        let slot = self.ring.as_mut_ptr().add(self.pushed & (LAG - 1));
         if self.pushed >= LAG {
-            let old = *self.ring.get_unchecked(slot);
-            self.finish(supply, &old);
+            self.finish(supply, &*slot);
         }
-        *self.ring.get_unchecked_mut(slot) = p;
+        slot.write(p);
         self.pushed += 1;
     }
 
@@ -295,12 +294,10 @@ impl Rows<6> for EventRows<'_, '_> {
             return;
         }
         let sh = self.fl.sh;
-        let tag = (spread(&key_of(d.add(a0), e0 - a0)) >> 32) as u32;
+        let tag = (hash_of(d.add(a0), e0 - a0) >> 32) as u32;
         os::soon(sh.cells.word_of(tag));
         let user_len = e1 - a1;
-        let user_key = key_of(d.add(a1), user_len);
-        let user_hash = spread(&user_key);
-        self.fl.table.warm(user_hash);
+        let (user_key, user_hash) = self.fl.table.begin(d.add(a1), user_len);
 
         let (ts, ingest) = if SKIP & 4 != 0 { (sh.win.ws + 5, sh.win.ws + 6) } else { (self.dates.instant(d.add(a2), e2 - a2), self.dates.instant(d.add(a3), e3 - a3)) };
         let mut ok = (user_len != 0) & (a5 != e5) & (ts >= sh.win.ws) & (ts < sh.win.we) & (ingest != NEVER);
@@ -385,9 +382,7 @@ impl Rows<3> for ClickRows<'_, '_> {
         }
         let sh = self.fl.sh;
         let user_len = e1 - a1;
-        let user_key = key_of(d.add(a1), user_len);
-        let user_hash = spread(&user_key);
-        self.fl.table.warm(user_hash);
+        let (user_key, user_hash) = self.fl.table.begin(d.add(a1), user_len);
         let ts = self.dates.instant(d.add(a3), e3 - a3);
         if (ts < sh.win.cws) | (ts >= sh.win.we) {
             return;
@@ -433,9 +428,7 @@ impl Rows<1> for LinkRows<'_, '_> {
         let slot = self.pairs.as_mut_ptr().add(n) as *mut u32;
         self.pairs.set_len(n + 1);
         for (k, (a, e)) in [(a0, e0), (a1, e1)].into_iter().enumerate() {
-            let key = key_of(d.add(a), e - a);
-            let hash = spread(&key);
-            self.fl.table.warm(hash);
+            let (key, hash) = self.fl.table.begin(d.add(a), e - a);
             self.fl.push(self.supply, Pending { into: slot.add(k), key, hash, at: d.add(a), len: e - a, tag: 0, marks: false });
         }
     }
@@ -545,5 +538,74 @@ pub fn read(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, f
         }
         let _ = fast;
         read_with::<Plain, SlowSqueeze>(sh, r, pairs, p, scanner == Scanner::Wide)
+    }
+}
+
+/// Counts rows; used to time a scanner on its own.
+struct CountRows(usize);
+
+impl<const N: usize> Rows<N> for CountRows {
+    #[inline(always)]
+    unsafe fn window(&mut self, _rows: usize) {}
+    #[inline(always)]
+    unsafe fn fields(&mut self, from: usize, a: &[usize; 8], e: &[usize; 8]) {
+        self.0 += 1 + ((from ^ a[6] ^ e[6]) & 0);
+    }
+}
+
+#[inline(always)]
+unsafe fn layer_with<L: Lens, Q: Squeeze>(what: u32, r: &mut Reader, data: &'static [u8], from: usize, to: usize) -> usize {
+    let d = data.as_ptr();
+    match what {
+        0 => {
+            // Every byte read once, eight at a time.
+            let mut sum = 0u64;
+            let mut p = from;
+            while p + 8 <= to {
+                sum = sum.wrapping_add(word(d.add(p)));
+                p += 8;
+            }
+            sum as usize
+        }
+        1 => {
+            let mut n = 0usize;
+            let mut p = from;
+            while p + 64 <= to {
+                let m = L::marks(d.add(p));
+                n += (m.line.count_ones() + (m.comma & m.quote).count_ones()) as usize;
+                p += 64;
+            }
+            n
+        }
+        2 => {
+            let mut rows = CountRows(0);
+            rows_in::<L, _, 6>(&mut r.ix, d, from, to, false, &mut rows);
+            rows.0
+        }
+        _ => {
+            let mut rows = CountRows(0);
+            rows_wide::<L, Q, _, 6>(&mut r.ix, &mut r.wx, d, from, to, false, &mut rows);
+            rows.0
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,popcnt")]
+unsafe fn layer_fast(what: u32, r: &mut Reader, data: &'static [u8], from: usize, to: usize) -> usize {
+    layer_with::<crate::scan::Avx, crate::scan::Bmi2>(what, r, data, from, to)
+}
+
+/// One layer of the reader over `data[from..to]` (whole rows), for timing experiments:
+/// 0 = touch every byte, 1 = classify every block, 2 = general scanner, 3 = wide scanner.
+pub fn layer(what: u32, r: &mut Reader, data: &'static [u8], from: usize, to: usize, fast: bool) -> usize {
+    // SAFETY: as `read`.
+    unsafe {
+        #[cfg(target_arch = "x86_64")]
+        if fast {
+            return layer_fast(what, r, data, from, to);
+        }
+        let _ = fast;
+        layer_with::<Plain, SlowSqueeze>(what, r, data, from, to)
     }
 }
