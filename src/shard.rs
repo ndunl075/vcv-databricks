@@ -251,6 +251,19 @@ impl Deal<'_> {
     }
 }
 
+impl Deal<'_> {
+    /// Starts loading what `event` will need for this record. The record must be in cache.
+    ///
+    /// # Safety
+    /// `r` must be a live record.
+    #[inline(always)]
+    pub unsafe fn warm(&self, r: &Ev) {
+        if r.who != NOBODY {
+            os::soon(self.lead.as_ptr().add(r.who as usize));
+        }
+    }
+}
+
 const AHEAD: usize = 16;
 
 /// Deals the valid events of a run whose event_id cannot have a copy, and lists the others.

@@ -328,7 +328,7 @@ fn run() -> Result<(), String> {
             seen += lists.iter().map(|l| l.len()).sum::<usize>();
             // SAFETY: suspects point at live records and rows; survivors are valid when `who` is set.
             unsafe {
-                dedup::settle(&lists, &mut desk, &mut dates, |rec| {
+                dedup::settle(&lists, &mut desk, &mut dates, |rec| deal.warm(&*rec), |rec| {
                     if (*rec).who != parse::NOBODY {
                         deal.event(&*rec, events);
                     }

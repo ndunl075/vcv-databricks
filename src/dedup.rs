@@ -83,7 +83,7 @@ fn tag_slot(tag: u32, bits: u32) -> usize {
 ///
 /// # Safety
 /// Every suspect must point at a live record and at the start of the row it was read from.
-pub unsafe fn settle(lists: &[&[Suspect]], desk: &mut Desk, dates: &mut Dates, mut keep: impl FnMut(*mut Ev)) {
+pub unsafe fn settle(lists: &[&[Suspect]], desk: &mut Desk, dates: &mut Dates, warm: impl Fn(*mut Ev), mut keep: impl FnMut(*mut Ev)) {
     let total: usize = lists.iter().map(|l| l.len()).sum();
     if total < 2 {
         lists.iter().flat_map(|l| l.iter()).for_each(|s| keep(s.rec));
@@ -111,8 +111,11 @@ pub unsafe fn settle(lists: &[&[Suspect]], desk: &mut Desk, dates: &mut Dates, m
     desk.again.clear();
     for list in lists {
         for (i, s) in list.iter().enumerate() {
-            if let Some(ahead) = list.get(i + 8) {
+            if let Some(ahead) = list.get(i + 16) {
                 os::soon(ahead.rec);
+            }
+            if let Some(ahead) = list.get(i + 8) {
+                warm(ahead.rec);
             }
             let mut j = tag_slot(s.tag, bits);
             // Every tag was counted above, so its slot is found before a free one.
@@ -160,7 +163,15 @@ pub unsafe fn settle(lists: &[&[Suspect]], desk: &mut Desk, dates: &mut Dates, m
             j = (j + 1) & mask;
         }
     }
-    for k in table.iter() {
+    for (i, k) in table.iter().enumerate() {
+        if let Some(ahead) = table.get(i + 16) {
+            os::soon(ahead.rec);
+        }
+        if let Some(ahead) = table.get(i + 8) {
+            if !ahead.rec.is_null() {
+                warm(ahead.rec);
+            }
+        }
         if !k.rec.is_null() {
             keep(k.rec);
         }
