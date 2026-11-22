@@ -1,6 +1,7 @@
 #!/bin/sh
 # Run the image the way the scorer does: docker_run.sh DATA_DIR OUTPUT_DIR
 # Same flags as the scorer box, except the resource limits come from CPUS / MEM.
+# SS_READER (general | wide), if set, is passed on: it forces the portable reader, for tests.
 set -eu
 IMAGE="${IMAGE:-shopping-sessions:latest}"
 CPUS="${CPUS:-8}"
@@ -29,5 +30,5 @@ docker run --rm --platform "$PLATFORM" \
   --user 1000:1000 \
   -v "$DATA":/data:ro,z -v "$OUT":/output:z -v "$SCRATCH":/scratch:z \
   -e DATA_DIR=/data -e OUTPUT_DIR=/output -e SCRATCH_DIR=/scratch -e HOME=/scratch \
-  -e NCPU="${CPUS%.*}" -e MEM_GB="${MEM%g}" \
+  -e NCPU="${CPUS%.*}" -e MEM_GB="${MEM%g}" ${SS_READER:+-e SS_READER=$SS_READER} \
   "$IMAGE"
