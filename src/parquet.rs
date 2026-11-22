@@ -653,7 +653,7 @@ pub fn write_table(path: &Path, names: &[&str], columns: &[ColumnView]) -> std::
         }
         IoSlice::advance_slices(&mut rest, n);
     }
-    crate::os::start_writeback(&file);
+    crate::os::start_writeback(file);
     Ok(())
 }
 

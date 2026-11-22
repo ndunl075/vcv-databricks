@@ -93,12 +93,33 @@ pub fn file_bytes(file: &File, bytes: usize) -> &'static [u8] {
 
 /// Asks the system to start writing a file's dirty pages to disk now, without waiting for it.
 /// Output written early is then on its way to disk while the rest of the run goes on, instead of
-/// all of it being flushed when the run ends.
-pub fn start_writeback(file: &File) {
+/// all of it being flushed when the run ends. The request is made on a helper thread: when the
+/// disk is busy the call can block, and the caller must not wait on it.
+pub fn start_writeback(file: File) {
     #[cfg(target_os = "linux")]
-    // SAFETY: advice only, on an open file; SYNC_FILE_RANGE_WRITE = 2, whole file.
-    unsafe {
-        sys::start_flush(file.as_raw_fd(), 0, 0, 2);
+    {
+        use std::sync::mpsc::{channel, Sender};
+        use std::sync::OnceLock;
+        static FLUSHER: OnceLock<Option<Sender<File>>> = OnceLock::new();
+        let to = FLUSHER.get_or_init(|| {
+            let (tx, rx) = channel::<File>();
+            std::thread::Builder::new()
+                .name("flush".into())
+                .stack_size(64 << 10)
+                .spawn(move || {
+                    for f in rx {
+                        // SAFETY: advice only, on an open file; SYNC_FILE_RANGE_WRITE = 2, whole file.
+                        unsafe {
+                            sys::start_flush(f.as_raw_fd(), 0, 0, 2);
+                        }
+                    }
+                })
+                .ok()
+                .map(|_| tx)
+        });
+        if let Some(tx) = to {
+            let _ = tx.send(file);
+        }
     }
     #[cfg(not(target_os = "linux"))]
     let _ = file;
