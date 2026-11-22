@@ -1,0 +1,143 @@
+name: rivals
+# Time rival entries (exact public commits) against ours on a real x86 runner, stock and reshuffled-ID data.
+# Trigger from the Mac with ci/rivals.sh. Rival code runs only inside the locked-down container (no network).
+on:
+  workflow_dispatch:
+    inputs:
+      list:
+        description: "'owner/repo full-sha' lines (empty = ci/rivals.txt)"
+        default: ""
+      ours:
+        description: our ref (the exactness reference and the same-VM yardstick)
+        default: 223ecb7
+      events:
+        description: events in the generated dataset
+        default: "20000000"
+      seed:
+        description: generator seed
+        default: "7"
+
+permissions:
+  contents: read
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      ours_sha: ${{ steps.src.outputs.ours_sha }}
+      mut_key: ${{ steps.src.outputs.mut_key }}
+    env:
+      VCV_CI_WORK: /home/runner/vcv-ci
+      EVENTS: ${{ inputs.events }}
+      SEED: ${{ inputs.seed }}
+      IN_OURS: ${{ inputs.ours }}
+      LIST: ${{ inputs.list }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Plan
+        id: plan
+        run: echo "matrix=$(python3 ci/plan_rivals.py)" >> "$GITHUB_OUTPUT"
+      - name: Source trees
+        id: src
+        run: |
+          ci/prep_src.sh ours="$IN_OURS" | tee /tmp/shas
+          echo "ours_sha=$(sed -n 's/^ours=//p' /tmp/shas)" >> "$GITHUB_OUTPUT"
+          echo "mut_key=$(git rev-parse origin/bench:bench/ood/mutate.py)" >> "$GITHUB_OUTPUT"
+      - name: Dataset cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/vcv-ci/data
+          key: data-v1-${{ inputs.events }}-${{ inputs.seed }}-${{ steps.src.outputs.mut_key }}
+      - name: Datasets
+        run: BENCH_SRC="$VCV_CI_WORK/src/bench" ci/prep_data.sh "$EVENTS" "$SEED"
+      - name: Build our image
+        run: |
+          docker build -q -t ci-ours "$VCV_CI_WORK/src/ours"
+          docker save ci-ours | gzip -1 > /tmp/ci-ours.tar.gz
+          ls -l /tmp/ci-ours.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ours-image
+          path: /tmp/ci-ours.tar.gz
+          compression-level: 0
+          retention-days: 3
+
+  rival:
+    needs: prep
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
+    env:
+      VCV_CI_WORK: /home/runner/vcv-ci
+      EVENTS: ${{ inputs.events }}
+      SEED: ${{ inputs.seed }}
+      RIVAL: ${{ matrix.repo }}
+      SHA: ${{ matrix.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Machine
+        run: |
+          echo "nproc: $(nproc)"; free -m | head -2; grep -m1 'model name' /proc/cpuinfo
+          for f in avx2 avx512f avx512bw; do grep -qm1 -w $f /proc/cpuinfo && echo "$f: yes" || echo "$f: NO"; done
+      - name: Checker and our image
+        run: |
+          ci/prep_src.sh >/dev/null
+          python3 -m venv /home/runner/venv && /home/runner/venv/bin/pip install -q --only-binary :all: polars
+          echo /home/runner/venv/bin >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ours-image
+          path: /tmp/ours
+      - run: gunzip -c /tmp/ours/ci-ours.tar.gz | docker load
+      - name: Datasets
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/vcv-ci/data
+          key: data-v1-${{ inputs.events }}-${{ inputs.seed }}-${{ needs.prep.outputs.mut_key }}
+          fail-on-cache-miss: true
+      - name: Fetch, build and time the rival
+        run: python3 ci/rival_job.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rival-${{ matrix.slug }}
+          path: /home/runner/vcv-ci/report/rival.json
+          if-no-files-found: ignore
+
+  summary:
+    needs: [prep, rival]
+    if: always() && needs.prep.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rival-*
+          path: /tmp/rivals
+      - name: Table
+        env:
+          OURS_NAME: ${{ inputs.ours }}
+          OURS_SHA: ${{ needs.prep.outputs.ours_sha }}
+        run: |
+          mkdir -p /tmp/report
+          python3 ci/summarize_rivals.py /tmp/rivals /tmp/report/results.json /tmp/report/summary.md "$OURS_NAME" "$OURS_SHA"
+          cat /tmp/report/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rivals-results
+          path: |
+            /tmp/report/results.json
+            /tmp/report/summary.md
