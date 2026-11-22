@@ -200,7 +200,9 @@ pub fn shard(st: &Stage, shard: usize, b: &mut Bench, out: &mut Out) {
     let (etb, ctb) = (st.event_time_bits, st.click_time_bits);
     let ei = sorted(st.events.parts(shard), bits + etb, &mut b.ev, &mut b.counts);
     let ci = sorted(st.clicks.parts(shard), bits + ctb, &mut b.ck, &mut b.counts);
-    let evs = std::mem::take(&mut b.ev[ei]);
+    let mut evs = std::mem::take(&mut b.ev[ei]);
+    // Copies that lost dedup are flagged where they were dealt.
+    evs.retain(|r| r[1] & crate::shard::DROPPED == 0);
     let cks = std::mem::take(&mut b.ck[ci]);
     let mut spans = std::mem::take(&mut b.spans);
     spans.clear();

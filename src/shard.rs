@@ -1,14 +1,17 @@
-//! Moves the surviving events and the clicks next to the other rows of the same person.
+//! Moves the events and the clicks next to the other rows of the same person.
 //!
 //! Every person gets a seat: the lead user number, scrambled by a fixed odd multiplier so that
 //! busy people spread evenly. The high bits of the seat pick a shard, the low bits number the
-//! person inside it. One sweep over the records deals every row that needs no dedup into its
-//! shard's blocks, through a small per-shard buffer so each write is a full cache line, and
-//! lists the dedup suspects; the suspects that survive dedup are dealt the same way afterwards.
+//! person inside it. Rows go into their shard's blocks through a small per-shard buffer, so each
+//! write is a full cache line. Valid events are dealt as they are read (links are read first, so
+//! every user's lead is known by then); a copy that loses dedup is flagged in its dealt row
+//! (`DROPPED`) and skipped later. Clicks are dealt by a sweep after reading.
 
-use crate::dedup::{group_of, Suspect, GROUPS};
 use crate::os;
-use crate::parse::{Cells, Ck, Ev, Run, NOBODY};
+use crate::parse::{Ck, Run};
+
+/// Set in the second word of a dealt event that lost dedup.
+pub const DROPPED: u64 = 1 << 63;
 
 /// A dealt row: two words (see `deal_events` and `deal_clicks`).
 pub type Row = [u64; 2];
@@ -103,9 +106,9 @@ impl Dealer {
         at
     }
 
-    /// Adds a row to a shard.
+    /// Adds a row to a shard; returns where the row will be once the dealer is finished.
     #[inline(always)]
-    pub fn put(&mut self, shard: usize, row: Row) {
+    pub fn put(&mut self, shard: usize, row: Row) -> *mut Row {
         // SAFETY: `shard` is below the shard count; blocks are 64-byte aligned, so the low bits
         // of a row address say which quarter of its cache line it is.
         unsafe {
@@ -121,6 +124,7 @@ impl Dealer {
             if k == 3 {
                 send_line(at.sub(3) as *mut u8, line);
             }
+            at
         }
     }
 
@@ -210,70 +214,54 @@ impl Dealt {
     }
 }
 
-/// One thread's results of the sweep: its dealt rows and the dedup suspects it met.
+/// One thread's results of the click sweep.
 pub struct Hand {
-    pub events: Dealer,
     pub clicks: Dealer,
-    pub suspects: Vec<Vec<Suspect>>,
 }
 
 // SAFETY: a hand is used by one thread at a time.
 unsafe impl Send for Hand {}
 
 impl Hand {
-    pub fn new(shards: usize, expected_suspects: usize) -> Hand {
-        Hand { events: Dealer::new(shards), clicks: Dealer::new(shards), suspects: (0..GROUPS).map(|_| Vec::with_capacity(expected_suspects / GROUPS + 16)).collect() }
+    pub fn new(shards: usize) -> Hand {
+        Hand { clicks: Dealer::new(shards) }
     }
 }
 
 /// What every sweep needs to turn a record into a dealt row.
 pub struct Deal<'a> {
     pub seats: &'a Seating,
-    /// For every user number, the person's lead number.
+    /// The person's lead number, for every user number below its length; a larger number is
+    /// its own lead (it was handed out after the links were joined, so it is in no link).
     pub lead: &'a [u32],
     pub event_time_bits: u32,
     pub click_time_bits: u32,
 }
 
 impl Deal<'_> {
-    /// Deals one valid event. A dealt event is
+    #[inline(always)]
+    fn lead_of(&self, who: u32) -> u32 {
+        match self.lead.get(who as usize) {
+            Some(&l) => l,
+            None => who,
+        }
+    }
+
+    /// Deals one valid event of user number `who`: `key` is milliseconds after the window
+    /// start shifted left 24 plus the price, `cat` the category rank. A dealt event is
     /// `[person-in-shard << time_bits | milliseconds after the window start, price | category << 32]`,
     /// so ordering a shard's rows by the first word groups them by person, in time order.
-    ///
-    /// # Safety
-    /// `r.who` must be a user number.
+    /// Returns where the row will be.
     #[inline(always)]
-    pub unsafe fn event(&self, r: &Ev, d: &mut Dealer) {
+    pub fn event(&self, who: u32, key: u64, cat: u32, d: &mut Dealer) -> *mut Row {
         let bits = self.seats.local_bits;
-        let seat = self.seats.seat(*self.lead.get_unchecked(r.who as usize));
+        let seat = self.seats.seat(self.lead_of(who));
         let person = (seat & ((1u32 << bits) - 1)) as u64;
-        d.put((seat >> bits) as usize, [person << self.event_time_bits | r.key >> 24, (r.key & 0xff_ffff) | (r.cat as u64) << 32]);
+        d.put((seat >> bits) as usize, [person << self.event_time_bits | key >> 24, (key & 0xff_ffff) | (cat as u64) << 32])
     }
 }
 
 const AHEAD: usize = 16;
-
-/// Deals the valid events of a run whose event_id cannot have a copy, and lists the others.
-///
-/// # Safety
-/// The run must be live; `deal.lead` must cover every user number.
-pub unsafe fn sweep_events(run: &Run<Ev>, cells: &Cells, deal: &Deal, h: &mut Hand) {
-    for i in 0..run.n {
-        let r = &*run.first.add(i);
-        if i + AHEAD < run.n {
-            let next = &*run.first.add(i + AHEAD);
-            os::soon(cells.word_of(next.tag));
-            if next.who != NOBODY {
-                os::soon(deal.lead.as_ptr().add(next.who as usize));
-            }
-        }
-        if cells.crowded(r.tag) {
-            h.suspects.get_unchecked_mut(group_of(r.tag)).push(Suspect { rec: run.first.add(i), row: run.base.add(r.at as usize), tag: r.tag });
-        } else if r.who != NOBODY {
-            deal.event(r, &mut h.events);
-        }
-    }
-}
 
 /// Deals the clicks of a run. A dealt click is
 /// `[person-in-shard << time_bits | milliseconds after the click window start, campaign | number << 32]`,
@@ -290,7 +278,7 @@ pub unsafe fn sweep_clicks(run: &Run<Ck>, first: u32, deal: &Deal, h: &mut Hand)
         if i + AHEAD < run.n {
             os::soon(deal.lead.as_ptr().add((*run.first.add(i + AHEAD)).who as usize));
         }
-        let seat = deal.seats.seat(*deal.lead.get_unchecked(r.who as usize));
+        let seat = deal.seats.seat(deal.lead_of(r.who));
         h.clicks.put((seat >> bits) as usize, [((seat & low) as u64) << deal.click_time_bits | r.when, r.camp as u64 | ((first as u64 + i as u64) << 32)]);
     }
 }

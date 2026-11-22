@@ -1,10 +1,11 @@
 //! Shopping Sessions pipeline: exact, general, multi-threaded.
 //!
-//! 1. Read: every input piece becomes fixed-size records; user IDs become numbers; links are
-//!    joined into people while events and clicks are still being read.
-//! 2. Sweep: clicks, and events whose event_id cannot have a copy, are dealt next to the other
-//!    rows of their person; the events that may have copies are listed.
-//! 3. Dedup: the listed events are settled exactly, by event_id bytes, and the survivors dealt.
+//! 1. Read: user IDs become numbers. Links are read first and joined into people while clicks
+//!    are read; then events are read, and every valid one is dealt next to the other rows of its
+//!    person at once. Every event_id is filed by hash for dedup.
+//! 2. Mark and dedup: per range of hash cells, the cells are marked and the events that may
+//!    have copies are settled exactly; the dealt rows of losing copies are flagged.
+//! 3. Sweep: clicks are dealt next to the other rows of their person.
 //! 4. People: per shard, sessions, credit, assists and the output rows; then the Parquet files.
 
 mod acc;
@@ -25,19 +26,18 @@ mod ts;
 mod util;
 
 use acc::CampAcc;
-use dedup::{Desk, Suspect, GROUPS};
+use dedup::Desk;
 use ids::Names;
 use input::{list_csv, open_view, plan_slices};
 use parquet::{ColumnView, TextColumn};
-use parse::{Cells, Ck, Ev, Kind, Piece, Reader, Run, Scanner, Shared};
+use parse::{Cells, Ck, Kind, Piece, Reader, Run, Scanner, Shared};
 use people::People;
 use sessions::{Bench, Out, Stage, UserCols};
 use shard::{Deal, Dealt, Hand, Seating};
-use stamp::Dates;
 use std::cell::UnsafeCell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Instant;
 use util::DAY_MS;
 
@@ -72,9 +72,6 @@ impl<T> Each<T> {
     unsafe fn item(&self, i: usize) -> &mut T {
         &mut *self.0[i].get()
     }
-    fn from_vec(items: Vec<T>) -> Each<T> {
-        Each(items.into_iter().map(UnsafeCell::new).collect())
-    }
     fn into_vec(self) -> Vec<T> {
         self.0.into_iter().map(|c| c.into_inner()).collect()
     }
@@ -87,8 +84,6 @@ unsafe impl<T> Send for Shareable<T> {}
 
 unsafe impl<T> Send for Run<T> {}
 unsafe impl<T> Sync for Run<T> {}
-unsafe impl Send for Suspect {}
-unsafe impl Sync for Suspect {}
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     PathBuf::from(std::env::var(name).unwrap_or_else(|_| default.to_string()))
@@ -171,7 +166,8 @@ fn run() -> Result<(), String> {
     let sh = Shared { win, prods: &prods, camps: &camps, names: &names, cells: Cells::new(ev_bytes) };
     let piece_bytes = (all_bytes / (threads * 24)).clamp(128 << 10, 1 << 20);
     let mut pieces: Vec<Piece> = Vec::new();
-    for (kind, files) in [(Kind::Links, &lk_files), (Kind::Events, &ev_files), (Kind::Clicks, &ck_files)] {
+    // Links first, so they are joined (while clicks are read) before events need the people.
+    for (kind, files) in [(Kind::Links, &lk_files), (Kind::Clicks, &ck_files), (Kind::Events, &ev_files)] {
         for s in plan_slices(files, piece_bytes) {
             let data = files[s.file];
             let (from, to) = s.rows(data);
@@ -180,6 +176,12 @@ fn run() -> Result<(), String> {
             }
         }
     }
+    // Seats must be known before events are read, when the number of user IDs is not: allow
+    // for every 32-bit number.
+    let seats = Seating::new(u32::MAX as usize, ev_bytes / 80);
+    let shards = seats.shards;
+    let event_time_bits = shard::bits_for(sh.win.we - sh.win.ws);
+    let click_time_bits = shard::bits_for(sh.win.we - sh.win.cws);
     if parse::SKIP == 64 {
         // Timing experiment: each layer of the event reader on one thread, on the largest file.
         let data = ev_files.first().copied().unwrap_or(&[]);
@@ -188,7 +190,8 @@ fn run() -> Result<(), String> {
         while to > from && data[to - 1] != b'\n' {
             to -= 1;
         }
-        let mut reader = Reader::new(data.len() / 64);
+        let mut reader = Reader::new(data.len() / 64, shards);
+        let deal = Deal { seats: &seats, lead: &[], event_time_bits, click_time_bits };
         let (fast, scanner) = reader_choice();
         let ms = |f: &mut dyn FnMut() -> usize| {
             let t = Instant::now();
@@ -206,7 +209,7 @@ fn run() -> Result<(), String> {
         for (name, f, sc) in [("readw", fast, Scanner::Wide), ("readw", fast, Scanner::Wide), ("readg", false, Scanner::General), ("readslow", false, Scanner::Wide)] {
             let piece = Piece { kind: Kind::Events, data, from, to };
             let (t, _) = ms(&mut || {
-                parse::read(&sh, &mut reader, &mut Vec::new(), &piece, f, sc);
+                parse::read(&sh, Some(&deal), &mut reader, &mut Vec::new(), &piece, f, sc);
                 0
             });
             line.push_str(&format!(" {name}={t:.0}"));
@@ -219,9 +222,12 @@ fn run() -> Result<(), String> {
     let links_left = AtomicUsize::new(link_pieces);
     let (fast, scanner) = reader_choice();
     // Event rows run about 80 bytes; readers take pieces as they go, so allow for an uneven share.
-    let readers: Each<Reader> = Each::new(threads, || Reader::new(ev_bytes / 64 / threads));
+    let readers: Each<Reader> = Each::new(threads, || Reader::new(ev_bytes / 64 / threads, shards));
     let pair_lists: Each<Vec<[u32; 2]>> = Each::new(threads, Vec::new);
-    let joined: Mutex<Option<People>> = Mutex::new(if link_pieces == 0 { Some(People::join(&names, &[])) } else { None });
+    let joined: OnceLock<People> = OnceLock::new();
+    if link_pieces == 0 {
+        let _ = joined.set(People::join(&names, &[]));
+    }
     let next = AtomicUsize::new(0);
     par(threads, |w| {
         // SAFETY: worker `w` owns reader `w`; pair list `w` is only shared once all links are read.
@@ -232,28 +238,40 @@ fn run() -> Result<(), String> {
                 break;
             }
             let piece = &pieces[i];
-            if piece.kind == Kind::Links {
-                parse::read(&sh, reader, unsafe { pair_lists.item(w) }, piece, fast, scanner);
-                if links_left.fetch_sub(1, Ordering::SeqCst) == 1 {
-                    // Every link row is read: join them while the others read events.
-                    let lists: Vec<&[[u32; 2]]> = (0..threads).map(|t| unsafe { &pair_lists.item(t)[..] }).collect();
-                    *joined.lock().unwrap() = Some(People::join(&names, &lists));
+            match piece.kind {
+                Kind::Links => {
+                    parse::read(&sh, None, reader, unsafe { pair_lists.item(w) }, piece, fast, scanner);
+                    if links_left.fetch_sub(1, Ordering::SeqCst) == 1 {
+                        // Every link row is read: join them while the others read clicks.
+                        let lists: Vec<&[[u32; 2]]> = (0..threads).map(|t| unsafe { &pair_lists.item(t)[..] }).collect();
+                        let _ = joined.set(People::join(&names, &lists));
+                    }
                 }
-            } else {
-                parse::read(&sh, reader, &mut Vec::new(), piece, fast, scanner);
+                Kind::Clicks => parse::read(&sh, None, reader, &mut Vec::new(), piece, fast, scanner),
+                Kind::Events => {
+                    let people = loop {
+                        match joined.get() {
+                            Some(p) => break p,
+                            None => std::thread::yield_now(),
+                        }
+                    };
+                    let deal = Deal { seats: &seats, lead: &people.lead, event_time_bits, click_time_bits };
+                    parse::read(&sh, Some(&deal), reader, &mut Vec::new(), piece, fast, scanner);
+                }
             }
         }
+        reader.dealer.finish();
     });
-    let mut people = joined.into_inner().unwrap().expect("links joined");
+    let mut people = joined.into_inner().expect("links joined");
     let ids = names.count();
     people.cover(ids);
-    let mut ev_runs: Vec<Run<Ev>> = Vec::new();
     let mut ck_runs: Vec<(Run<Ck>, u32)> = Vec::new();
     let mut ck_total = 0u64;
     let mut tag_lists: Vec<parse::TagBins> = Vec::with_capacity(threads);
+    let mut ev_blocks = Vec::with_capacity(threads);
     for r in readers.into_vec() {
         tag_lists.push(r.tags);
-        ev_runs.extend(r.ev_runs);
+        ev_blocks.push(r.dealer.blocks);
         for run in r.ck_runs {
             let n = run.n as u64;
             ck_runs.push((run, ck_total as u32));
@@ -263,87 +281,59 @@ fn run() -> Result<(), String> {
     if ck_total > u32::MAX as u64 {
         return Err("more than four billion clicks".to_string());
     }
-    let ev_total: usize = ev_runs.iter().map(|r| r.n).sum();
-    lg!(t0, "read", "read: {} event rows, {} clicks, {} user ids", ev_total, ck_total, ids);
+    let events = Dealt::new(&ev_blocks.iter().map(|b| &b[..]).collect::<Vec<_>>(), shards);
+    let ev_total: usize = (0..shards).map(|s| events.count(s)).sum();
+    lg!(t0, "read", "read: {} valid events dealt, {} clicks, {} user ids", ev_total, ck_total, ids);
     if parse::SKIP != 0 {
         eprintln!("stages{}", t0.short);
         return Ok(());
     }
 
-    // Mark the event cells, one range of cells per worker at a time.
+    // ---- 2. Mark the event cells and settle the copies, one range of cells per worker at a time ----
     let next = AtomicUsize::new(0);
-    par(threads, |_| loop {
-        let k = next.fetch_add(1, Ordering::Relaxed);
-        if k >= parse::RANGES {
-            break;
+    let suspects: usize = par(threads, |_| {
+        let mut desk = Desk::default();
+        let mut seen = 0usize;
+        loop {
+            let k = next.fetch_add(1, Ordering::Relaxed);
+            if k >= parse::RANGES {
+                break;
+            }
+            let lists: Vec<(&[u32], &[parse::Sighting])> = tag_lists.iter().flat_map(|t| t.range(k)).collect();
+            let tags: Vec<&[u32]> = lists.iter().map(|l| l.0).collect();
+            sh.cells.mark_range(&tags);
+            // SAFETY: sightings point at their rows and dealt rows; ranges are disjoint, and so
+            // are the dealt rows of their events.
+            seen += unsafe { dedup::settle(&sh.cells, &lists, &mut desk) };
         }
-        let lists: Vec<&[u32]> = tag_lists.iter().flat_map(|t| t.range(k)).collect();
-        sh.cells.mark_range(&lists);
-    });
+        seen
+    })
+    .into_iter()
+    .sum();
     // Kept until the process ends: giving it back costs more than it saves.
     std::mem::forget(tag_lists);
-    lg!(t0, "mark", "marked event cells");
+    lg!(t0, "dedup", "marked and deduped: {} suspects", suspects);
 
-    // ---- 2. Sweep: deal the rows that need no dedup, list the suspects ----
-    let seats = Seating::new(ids, ev_total);
-    let shards = seats.shards;
-    let deal = Deal { seats: &seats, lead: &people.lead, event_time_bits: shard::bits_for(sh.win.we - sh.win.ws), click_time_bits: shard::bits_for(sh.win.we - sh.win.cws) };
-    let hands: Each<Hand> = Each::new(threads, || Hand::new(shards, ev_total / 4 / threads));
+    // ---- 3. Sweep: deal the clicks ----
+    let deal = Deal { seats: &seats, lead: &people.lead, event_time_bits, click_time_bits };
+    let hands: Each<Hand> = Each::new(threads, || Hand::new(shards));
     let next = AtomicUsize::new(0);
     par(threads, |w| {
         // SAFETY: worker `w` owns hand `w`; each run is claimed by one worker.
         let h = unsafe { hands.item(w) };
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
-            if i < ev_runs.len() {
-                unsafe { shard::sweep_events(&ev_runs[i], &sh.cells, &deal, h) };
-            } else if i < ev_runs.len() + ck_runs.len() {
-                let (run, first) = &ck_runs[i - ev_runs.len()];
-                unsafe { shard::sweep_clicks(run, *first, &deal, h) };
-            } else {
+            if i >= ck_runs.len() {
                 break;
             }
+            let (run, first) = &ck_runs[i];
+            unsafe { shard::sweep_clicks(run, *first, &deal, h) };
         }
         h.clicks.finish();
     });
-    lg!(t0, "sweep", "swept: {} shards", shards);
-    let mut hands = hands.into_vec();
-    let suspect_lists: Vec<Vec<Vec<Suspect>>> = hands.iter_mut().map(|h| std::mem::take(&mut h.suspects)).collect();
-    let hands = Each::from_vec(hands);
-
-    // ---- 3. Dedup: settle the suspects, deal the survivors ----
-    let next = AtomicUsize::new(0);
-    let suspects: usize = par(threads, |w| {
-        // SAFETY: worker `w` owns hand `w`.
-        let events = unsafe { &mut hands.item(w).events };
-        let mut desk = Desk::default();
-        let mut dates = Dates::new();
-        let mut seen = 0usize;
-        loop {
-            let g = next.fetch_add(1, Ordering::Relaxed);
-            if g >= GROUPS {
-                break;
-            }
-            let lists: Vec<&[Suspect]> = suspect_lists.iter().map(|l| &l[g][..]).collect();
-            seen += lists.iter().map(|l| l.len()).sum::<usize>();
-            // SAFETY: suspects point at live records and rows; survivors are valid when `who` is set.
-            unsafe {
-                dedup::settle(&lists, &mut desk, &mut dates, |rec| {
-                    if (*rec).who != parse::NOBODY {
-                        deal.event(&*rec, events);
-                    }
-                })
-            };
-        }
-        events.finish();
-        seen
-    })
-    .into_iter()
-    .sum();
     let hands = hands.into_vec();
-    let events = Dealt::new(&hands.iter().map(|h| &h.events.blocks[..]).collect::<Vec<_>>(), shards);
     let clicks = Dealt::new(&hands.iter().map(|h| &h.clicks.blocks[..]).collect::<Vec<_>>(), shards);
-    lg!(t0, "dedup", "deduped: {} suspects", suspects);
+    lg!(t0, "sweep", "swept clicks: {} shards", shards);
 
     // ---- 4. People ----
     let stage = Stage {

@@ -1,11 +1,13 @@
 //! Turns rows into fixed-size records, one input piece at a time.
 //!
-//! Events: every row with an event_id becomes an `Ev`, valid or not, because an invalid copy can
-//! still be the one dedup keeps. Each event_id also marks a 2-bit cell chosen by its hash:
-//! "seen" and "seen more than once". Only events whose cell says "more than once" need the exact
-//! dedup later. The marks are made after reading, not during it: each reader files its events'
-//! hash tags by cell range, then each range is marked by one thread alone, with plain writes to
-//! memory that stays in cache, instead of a locked instruction on a far cache line per row.
+//! Events: links are read first, so when an event is read its person is known, and a valid event
+//! is dealt into its person's shard at once (`shard::Deal`). Every row with an event_id, valid
+//! or not, is also filed as a `Sighting` (an invalid copy can still be the one dedup keeps), and
+//! its event_id marks a 2-bit cell chosen by its hash: "seen" and "seen more than once". Only
+//! events whose cell says "more than once" need the exact dedup (`dedup::settle`), which flags
+//! the dealt rows of the copies that lose. The marks are made after reading: each reader files
+//! its sightings by cell range, then each range is marked and settled by one thread alone, in
+//! memory that stays in cache.
 //! Clicks: only valid clicks become a `Ck`. Links: both IDs' numbers.
 //!
 //! User IDs become numbers through `Names`. Those lookups touch memory far apart, so each row's lookups are started (address computed, cache line requested) and
@@ -13,6 +15,7 @@
 
 use crate::ids::{hash_of, word, Key, Names, Supply, Table, LOW_BYTES};
 use crate::os;
+use crate::shard::{Deal, Dealer, Row};
 use crate::scan::{rows_in, rows_wide, Index, Lens, Plain, Rows, SlowSqueeze, Squeeze, Wide};
 use crate::stamp::{Dates, NEVER};
 use crate::tables::{Campaigns, Products, Window};
@@ -21,24 +24,21 @@ use crate::util::DAY_MS;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::RwLockReadGuard;
 
-/// `who` of an event that takes no part in sessions: invalid, or a copy that lost dedup.
+/// `who` of a click before its user number is known.
 pub const NOBODY: u32 = u32::MAX;
 
-/// One event row.
+/// One event row with an event_id, as dedup needs it.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Ev {
-    /// Valid events: milliseconds after the window start, shifted left 24, plus the price of a
-    /// valid purchase (0 for views and carts).
-    pub key: u64,
-    /// User number, later the person's seat; `NOBODY` when the event is not valid.
-    pub who: u32,
-    /// Category rank of a purchase.
-    pub cat: u32,
-    /// High half of the event_id hash.
-    pub tag: u32,
-    /// Where the row starts, counted from its run's base.
-    pub at: u32,
+pub struct Sighting {
+    /// ingest_ts; `i64::MAX` when unreadable.
+    pub ingest: i64,
+    /// Where the event was dealt; null when it is not valid.
+    pub dealt: *mut Row,
+    /// First byte of the row.
+    pub row: *const u8,
+    /// Hash of the event_id; its high half is the tag.
+    pub hash: u64,
 }
 
 /// One valid click.
@@ -53,14 +53,12 @@ pub struct Ck {
     pub id_at: *const u8,
 }
 
-const _: () = assert!(std::mem::size_of::<Ev>() == 24 && std::mem::size_of::<Ck>() == 24);
+const _: () = assert!(std::mem::size_of::<Sighting>() == 32 && std::mem::size_of::<Ck>() == 24);
 
 /// A stretch of records written one after another.
 pub struct Run<T> {
     pub first: *mut T,
     pub n: usize,
-    /// Events: the address `Ev::at` counts from.
-    pub base: *const u8,
 }
 
 /// The 2-bit cells for event_id hashes.
@@ -118,13 +116,15 @@ impl Cells {
 /// Tags are filed into this many ranges of cells; each range is marked by one thread.
 pub const RANGES: usize = 256;
 
-/// One reader's event tags, filed by cell range: a fixed bin per range in one region of memory,
-/// and a list for whatever does not fit.
+/// One reader's event sightings, filed by cell range: a fixed bin per range in one region of
+/// memory, and a list for whatever does not fit. The tags are kept apart too, side by side
+/// with the sightings, so marking reads only them.
 pub struct TagBins {
     room: usize,
     bins: *mut u32,
+    seen: *mut Sighting,
     lens: Vec<usize>,
-    spill: Vec<Vec<u32>>,
+    spill: Vec<(Vec<u32>, Vec<Sighting>)>,
 }
 
 // SAFETY: the region is owned by this value alone, and shared only for reading.
@@ -135,27 +135,38 @@ impl TagBins {
     /// Bins for about `rows` events.
     pub fn new(rows: usize) -> TagBins {
         let room = (rows / RANGES + rows / RANGES / 8 + 16).next_multiple_of(16);
-        TagBins { room, bins: os::zeroed_array::<u32>(room * RANGES), lens: vec![0; RANGES], spill: (0..RANGES).map(|_| Vec::new()).collect() }
+        TagBins {
+            room,
+            bins: os::zeroed_array::<u32>(room * RANGES),
+            seen: os::zeroed_array::<Sighting>(room * RANGES),
+            lens: vec![0; RANGES],
+            spill: (0..RANGES).map(|_| (Vec::new(), Vec::new())).collect(),
+        }
     }
     #[inline(always)]
-    pub fn push(&mut self, tag: u32) {
+    pub fn push(&mut self, s: Sighting) {
+        let tag = (s.hash >> 32) as u32;
         let r = range_of(tag);
         // SAFETY: `r` is below RANGES; the bin index is checked against its room.
         unsafe {
             let n = self.lens.get_unchecked_mut(r);
             if *n < self.room {
-                *self.bins.add(r * self.room + *n) = tag;
+                let at = r * self.room + *n;
+                *self.bins.add(at) = tag;
+                self.seen.add(at).write(s);
                 *n += 1;
             } else {
-                self.spill.get_unchecked_mut(r).push(tag);
+                let sp = self.spill.get_unchecked_mut(r);
+                sp.0.push(tag);
+                sp.1.push(s);
             }
         }
     }
-    /// The tags of range `r`, in up to two slices.
-    pub fn range(&self, r: usize) -> [&[u32]; 2] {
+    /// The tags and sightings of range `r`, in up to two pairs of slices.
+    pub fn range(&self, r: usize) -> [(&[u32], &[Sighting]); 2] {
         // SAFETY: the first `lens[r]` items of bin `r` were written.
-        let bin = unsafe { std::slice::from_raw_parts(self.bins.add(r * self.room), self.lens[r]) };
-        [bin, &self.spill[r][..]]
+        let (tags, seen) = unsafe { (std::slice::from_raw_parts(self.bins.add(r * self.room), self.lens[r]), std::slice::from_raw_parts(self.seen.add(r * self.room), self.lens[r])) };
+        [(tags, seen), (&self.spill[r].0[..], &self.spill[r].1[..])]
     }
 }
 
@@ -187,27 +198,24 @@ pub struct Reader {
     wx: Wide,
     dates: Dates,
     supply: Supply,
-    ev_free: *mut Ev,
-    ev_left: usize,
-    pub ev_runs: Vec<Run<Ev>>,
+    /// Valid events, dealt into shards.
+    pub dealer: Dealer,
     ck_free: *mut Ck,
     ck_left: usize,
     pub ck_runs: Vec<Run<Ck>>,
-    /// Event hash tags, filed by cell range (`range_of`).
+    /// Event sightings, filed by cell range (`range_of`).
     pub tags: TagBins,
 }
 
 impl Reader {
-    /// A reader that expects to see about `events` event rows.
-    pub fn new(events: usize) -> Reader {
+    /// A reader that expects to see about `events` event rows, dealing into `shards` shards.
+    pub fn new(events: usize, shards: usize) -> Reader {
         Reader {
             ix: Index::new(),
             wx: Wide::new(),
             dates: Dates::new(),
             supply: Supply::new(),
-            ev_free: std::ptr::null_mut(),
-            ev_left: 0,
-            ev_runs: Vec::new(),
+            dealer: Dealer::new(shards),
             ck_free: std::ptr::null_mut(),
             ck_left: 0,
             ck_runs: Vec::new(),
@@ -216,18 +224,30 @@ impl Reader {
     }
 }
 
-/// A lookup that has been started.
+/// A lookup that has been started, and for events what to do once it is done.
 #[derive(Clone, Copy)]
 struct Pending {
-    /// Where the user number goes; null when there is none to find.
+    /// Links and clicks: where the user number goes; null when there is none to find.
     into: *mut u32,
     key: Key,
     hash: u64,
     at: *const u8,
     len: usize,
+    /// Events: the sighting (its `dealt` set once dealt), and what the dealt row needs.
+    seen: Sighting,
+    ev_key: u64,
+    cat: u32,
+    valid: bool,
 }
 
 const LAG: usize = 8;
+
+/// Where an event reader's results go.
+struct Sink<'a> {
+    deal: &'a Deal<'a>,
+    dealer: *mut Dealer,
+    tags: *mut TagBins,
+}
 
 /// The lookups in flight, and the table they run against.
 struct Flight<'a> {
@@ -236,19 +256,28 @@ struct Flight<'a> {
     guard: Option<RwLockReadGuard<'a, ()>>,
     ring: [Pending; LAG],
     pushed: usize,
+    sink: Option<Sink<'a>>,
 }
 
 impl<'a> Flight<'a> {
-    fn new(sh: &'a Shared<'a>) -> Flight<'a> {
+    fn new(sh: &'a Shared<'a>, sink: Option<Sink<'a>>) -> Flight<'a> {
         let guard = sh.names.gate.read().unwrap();
         let table = sh.names.table();
-        let idle = Pending { into: std::ptr::null_mut(), key: [0; 3], hash: 0, at: std::ptr::null(), len: 0 };
-        Flight { sh, table, guard: Some(guard), ring: [idle; LAG], pushed: 0 }
+        let mut f = Flight { sh, table, guard: Some(guard), ring: unsafe { std::mem::zeroed() }, pushed: 0, sink };
+        f.ring = [f.idle(); LAG];
+        f
     }
 
     #[inline(always)]
     unsafe fn finish(&self, supply: &mut Supply, p: &Pending) {
-        if !p.into.is_null() {
+        if let Some(sink) = &self.sink {
+            let mut seen = p.seen;
+            if p.valid {
+                let who = self.table.finish(self.sh.names, supply, &p.key, p.hash, p.at, p.len);
+                seen.dealt = sink.deal.event(who, p.ev_key, p.cat, &mut *sink.dealer);
+            }
+            (*sink.tags).push(seen);
+        } else if !p.into.is_null() {
             *p.into = self.table.finish(self.sh.names, supply, &p.key, p.hash, p.at, p.len);
         }
     }
@@ -295,6 +324,12 @@ impl<'a> Flight<'a> {
         self.sh.names.report(supply, &self.table);
         self.guard = None;
     }
+
+    #[inline(always)]
+    fn idle(&self) -> Pending {
+        let seen = Sighting { ingest: 0, dealt: std::ptr::null_mut(), row: std::ptr::null(), hash: 0 };
+        Pending { into: std::ptr::null_mut(), key: [0; 3], hash: 0, at: std::ptr::null(), len: 0, seen, ev_key: 0, cat: 0, valid: false }
+    }
 }
 
 /// Experiment switches for timing parts of the reader; 0 in every real build.
@@ -309,36 +344,12 @@ struct EventRows<'a, 'b> {
     data: *const u8,
     dates: &'b mut Dates,
     supply: &'b mut Supply,
-    runs: &'b mut Vec<Run<Ev>>,
-    tags: &'b mut TagBins,
-    free: *mut Ev,
-    left: usize,
-    run_first: *mut Ev,
-    /// Offset in `data` that `Ev::at` counts from.
-    run_base: usize,
-}
-
-impl EventRows<'_, '_> {
-    fn end_run(&mut self) {
-        // SAFETY: both pointers are in the same block.
-        let n = unsafe { self.free.offset_from(self.run_first) } as usize;
-        if n > 0 {
-            self.runs.push(Run { first: self.run_first, n, base: unsafe { self.data.add(self.run_base) } });
-        }
-        self.run_first = self.free;
-    }
 }
 
 impl Rows<6> for EventRows<'_, '_> {
     #[inline(always)]
-    unsafe fn window(&mut self, rows: usize) {
+    unsafe fn window(&mut self, _rows: usize) {
         self.fl.checkpoint(self.supply);
-        if self.left < rows {
-            self.end_run();
-            self.free = os::zeroed_array::<Ev>(BLOCK);
-            self.left = BLOCK;
-            self.run_first = self.free;
-        }
     }
 
     #[inline(always)]
@@ -353,7 +364,7 @@ impl Rows<6> for EventRows<'_, '_> {
             return;
         }
         let sh = self.fl.sh;
-        let tag = (hash_of(d.add(a0), e0 - a0) >> 32) as u32;
+        let hash = hash_of(d.add(a0), e0 - a0);
         let user_len = e1 - a1;
         let (user_key, user_hash) = self.fl.table.begin(d.add(a1), user_len);
 
@@ -377,23 +388,21 @@ impl Rows<6> for EventRows<'_, '_> {
             ok = false;
         }
 
-        let mut at = from - self.run_base;
-        if at > u32::MAX as usize {
-            self.end_run();
-            self.run_base = from;
-            at = 0;
-        }
-        let rec = self.free;
-        self.free = rec.add(1);
-        self.left -= 1;
-        let key = if ok { (((ts - sh.win.ws) as u64) << 24) | price as u64 } else { 0 };
-        rec.write(Ev { key, who: NOBODY, cat, tag, at: at as u32 });
-        self.tags.push(tag);
-        let into = if ok { std::ptr::addr_of_mut!((*rec).who) } else { std::ptr::null_mut() };
+        let ev_key = if ok { (((ts - sh.win.ws) as u64) << 24) | price as u64 } else { 0 };
+        let seen = Sighting { ingest: if ingest == NEVER { i64::MAX } else { ingest }, dealt: std::ptr::null_mut(), row: d.add(from), hash };
         if SKIP & 8 != 0 {
             return;
         }
-        self.fl.push(self.supply, Pending { into, key: user_key, hash: user_hash, at: d.add(a1), len: user_len });
+        let mut p = self.fl.idle();
+        p.key = user_key;
+        p.hash = user_hash;
+        p.at = d.add(a1);
+        p.len = user_len;
+        p.seen = seen;
+        p.ev_key = ev_key;
+        p.cat = cat;
+        p.valid = ok;
+        self.fl.push(self.supply, p);
     }
 }
 
@@ -413,7 +422,7 @@ impl ClickRows<'_, '_> {
         // SAFETY: both pointers are in the same block.
         let n = unsafe { self.free.offset_from(self.run_first) } as usize;
         if n > 0 {
-            self.runs.push(Run { first: self.run_first, n, base: self.data });
+            self.runs.push(Run { first: self.run_first, n });
         }
         self.run_first = self.free;
     }
@@ -454,7 +463,13 @@ impl Rows<3> for ClickRows<'_, '_> {
         self.free = rec.add(1);
         self.left -= 1;
         rec.write(Ck { when: (ts - sh.win.cws) as u64, who: NOBODY, camp, id_at: d.add(a0) });
-        self.fl.push(self.supply, Pending { into: std::ptr::addr_of_mut!((*rec).who), key: user_key, hash: user_hash, at: d.add(a1), len: user_len });
+        let mut p = self.fl.idle();
+        p.into = std::ptr::addr_of_mut!((*rec).who);
+        p.key = user_key;
+        p.hash = user_hash;
+        p.at = d.add(a1);
+        p.len = user_len;
+        self.fl.push(self.supply, p);
     }
 }
 
@@ -488,7 +503,13 @@ impl Rows<1> for LinkRows<'_, '_> {
         self.pairs.set_len(n + 1);
         for (k, (a, e)) in [(a0, e0), (a1, e1)].into_iter().enumerate() {
             let (key, hash) = self.fl.table.begin(d.add(a), e - a);
-            self.fl.push(self.supply, Pending { into: slot.add(k), key, hash, at: d.add(a), len: e - a });
+            let mut p = self.fl.idle();
+            p.into = slot.add(k);
+            p.key = key;
+            p.hash = hash;
+            p.at = d.add(a);
+            p.len = e - a;
+            self.fl.push(self.supply, p);
         }
     }
 }
@@ -528,34 +549,21 @@ unsafe fn scan<L: Lens, Q: Squeeze, R: Rows<N>, const N: usize>(wide: bool, ix: 
 }
 
 #[inline(always)]
-unsafe fn read_with<L: Lens, Q: Squeeze>(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, wide: bool) {
+unsafe fn read_with<L: Lens, Q: Squeeze>(sh: &Shared, deal: Option<&Deal>, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, wide: bool) {
     if p.from >= p.to {
         return;
     }
     let data = p.data.as_ptr();
     match p.kind {
         Kind::Events => {
-            let mut rows = EventRows {
-                fl: Flight::new(sh),
-                data,
-                dates: &mut r.dates,
-                supply: &mut r.supply,
-                runs: &mut r.ev_runs,
-                tags: &mut r.tags,
-                free: r.ev_free,
-                left: r.ev_left,
-                run_first: r.ev_free,
-                run_base: p.from,
-            };
+            let deal = deal.expect("events are read once the links are joined");
+            let sink = Sink { deal, dealer: &mut r.dealer, tags: &mut r.tags };
+            let mut rows = EventRows { fl: Flight::new(sh, Some(sink)), data, dates: &mut r.dates, supply: &mut r.supply };
             scan::<L, Q, _, 6>(wide, &mut r.ix, &mut r.wx, p, &mut rows);
             rows.fl.close(rows.supply);
-            rows.end_run();
-            let (free, left) = (rows.free, rows.left);
-            r.ev_free = free;
-            r.ev_left = left;
         }
         Kind::Clicks => {
-            let mut rows = ClickRows { fl: Flight::new(sh), data, dates: &mut r.dates, supply: &mut r.supply, runs: &mut r.ck_runs, free: r.ck_free, left: r.ck_left, run_first: r.ck_free };
+            let mut rows = ClickRows { fl: Flight::new(sh, None), data, dates: &mut r.dates, supply: &mut r.supply, runs: &mut r.ck_runs, free: r.ck_free, left: r.ck_left, run_first: r.ck_free };
             scan::<L, Q, _, 3>(wide, &mut r.ix, &mut r.wx, p, &mut rows);
             rows.fl.close(rows.supply);
             rows.end_run();
@@ -564,7 +572,7 @@ unsafe fn read_with<L: Lens, Q: Squeeze>(sh: &Shared, r: &mut Reader, pairs: &mu
             r.ck_left = left;
         }
         Kind::Links => {
-            let mut rows = LinkRows { fl: Flight::new(sh), data, supply: &mut r.supply, pairs };
+            let mut rows = LinkRows { fl: Flight::new(sh, None), data, supply: &mut r.supply, pairs };
             scan::<L, Q, _, 1>(wide, &mut r.ix, &mut r.wx, p, &mut rows);
             rows.fl.close(rows.supply);
         }
@@ -573,8 +581,8 @@ unsafe fn read_with<L: Lens, Q: Squeeze>(sh: &Shared, r: &mut Reader, pairs: &mu
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,bmi1,bmi2,popcnt")]
-unsafe fn read_fast(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece) {
-    read_with::<crate::scan::Avx, crate::scan::Bmi2>(sh, r, pairs, p, true)
+unsafe fn read_fast(sh: &Shared, deal: Option<&Deal>, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece) {
+    read_with::<crate::scan::Avx, crate::scan::Bmi2>(sh, deal, r, pairs, p, true)
 }
 
 /// True when this CPU can run the fast build of the reader (AVX2, BMI1, BMI2, POPCNT).
@@ -589,15 +597,16 @@ pub fn fast_cpu() -> bool {
 
 /// Reads one piece. `fast` (only after `fast_cpu()` said yes) runs the AVX2 + BMI2 build of the
 /// wide scanner; otherwise `scanner` picks the algorithm for the build every CPU can run.
-pub fn read(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, fast: bool, scanner: Scanner) {
+/// Events need `deal`.
+pub fn read(sh: &Shared, deal: Option<&Deal>, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, fast: bool, scanner: Scanner) {
     // SAFETY: pieces lie inside mapped files, which carry a readable zero tail.
     unsafe {
         #[cfg(target_arch = "x86_64")]
         if fast {
-            return read_fast(sh, r, pairs, p);
+            return read_fast(sh, deal, r, pairs, p);
         }
         let _ = fast;
-        read_with::<Plain, SlowSqueeze>(sh, r, pairs, p, scanner == Scanner::Wide)
+        read_with::<Plain, SlowSqueeze>(sh, deal, r, pairs, p, scanner == Scanner::Wide)
     }
 }
 
