@@ -7,6 +7,11 @@ Read this first. Cutoff is **Sun 2026-11-22 11:00 AM ET**. Track page with the r
 - That score is commit `efef389` of branch `core`. It was submitted from a separate entry-only repo (see "How to submit").
 - Commit `223ecb7` on `core` passes 51/51 fixtures, the 1M dev set, and a 20M set with reshuffled IDs against our reference checker. It is only about 4% faster than `efef389`, so it was not submitted.
 
+## Latest (2026-11-21 22:10 ET)
+- **On the board: 1.42 s, rank 59 of 352** (receipt BB-74ED6CF3, 9:55 PM ET), from `core` commit `da25d3d` (a rewritten pipeline: interned user IDs, 2-bit dedup cells, dealt shards). Accepted as exact.
+- **Rivals timed on real x86** (4-vCPU GitHub runner, 20M events; stock / reshuffled-ID seconds): Zhu-E 0.92 / 2.02, joch44 1.57 / 3.87, nave-neptunus 0.52 / 3.97, toM0dots 2.42 / 5.48, mwkhettab 0.56 / 6.78, Express Lane 0.41 / 7.33, micah-andelman 1.52 / 11.5. Ours at 223ecb7: 3.42 / 3.67, and `da25d3d` is about 2x faster than that. So on data whose IDs do not fit the practice generator the leaders collapse, and the entry to beat is Zhu-E.
+- **A real-x86 stopwatch exists and is free:** from a checkout of `main`, `bash ci/bench.sh <ref> [baseline-ref]` times two pushed commits back to back on stock and reshuffled-ID data and checks the tables match (about 10 minutes); `bash ci/rivals.sh [our-ref]` times the rivals in `ci/rivals.txt`. Results land under `~/Developer/vcv-data/db/ci/`. It runs on a separate public runner repo with encrypted results; it needs the passphrase file from the first machine (`~/Developer/vcv-data/db/ci-keys/pass`), ask Nico for it.
+
 ## Who works on what (updated 2026-11-21 21:05 ET)
 - **Branch `core` (general pipeline) is being worked on again on the first machine**, by a builder doing native speed work. Do not push to `core` from elsewhere; branch from it if you want to try something.
 - **Branch `fast` (the shortcut path) and the rival timing on branch `bench` are free for the second machine.** The most useful things there: build `fast/` in the x86 image and time it against `ss`; time the strongest rivals on stock and reshuffled-ID data.
