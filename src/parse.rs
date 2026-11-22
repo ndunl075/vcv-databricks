@@ -589,7 +589,7 @@ unsafe fn read_fast512(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p
 }
 
 /// Which AVX-512 lens `read_fast512` uses.
-const LENS_FULL: bool = true;
+const LENS_FULL: bool = false;
 
 /// True when this CPU has AVX-512 BW and VL as well as the fast reader's other features.
 pub fn avx512_cpu() -> bool {
