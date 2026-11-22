@@ -363,28 +363,39 @@ fn run() -> Result<(), String> {
         }
     }
 
+    // Each worker writes its user_daily rows in files of about FILE_ROWS rows as it goes, and
+    // each file is sent on its way to disk at once, so the disk works while the workers do.
+    const FILE_ROWS: usize = 1 << 16;
+    let write_users = |w: usize, k: usize, u: &UserCols| -> Result<(), String> {
+        let path = user_dir.join(format!("part-{w:03}-{k:04}.parquet"));
+        parquet::write_table(
+            &path,
+            &["user_id", "day", "sessions", "events", "revenue_cents", "top_category"],
+            &[ColumnView::Text(&u.user), ColumnView::Date(&u.day), ColumnView::Int32(&u.sessions), ColumnView::Int32(&u.events), ColumnView::Int64(&u.revenue), ColumnView::MaybeText(&u.top)],
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))
+    };
     let next = AtomicUsize::new(0);
     let results: Vec<Result<CampAcc, String>> = par(threads, |w| {
-        let mut out = Out { users: UserCols::with_room(ev_total / threads / 5 + 1024), acc: CampAcc::new(ncamp, day0, ndays) };
+        let mut out = Out { users: UserCols::with_room(FILE_ROWS + FILE_ROWS / 2), acc: CampAcc::new(ncamp, day0, ndays) };
         let mut bench = Bench::default();
+        let mut files = 0usize;
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
             if i >= shards {
                 break;
             }
             sessions::shard(&stage, order[i], &mut bench, &mut out);
+            if out.users.rows() >= FILE_ROWS {
+                write_users(w, files, &out.users)?;
+                files += 1;
+                out.users.clear();
+            }
         }
-        let u = &out.users;
-        if u.day.is_empty() && w != 0 {
-            return Ok(out.acc);
+        // Worker 0 always writes a file, so the table exists even with no rows.
+        if out.users.rows() > 0 || (w == 0 && files == 0) {
+            write_users(w, files, &out.users)?;
         }
-        let path = user_dir.join(format!("part-{w:03}.parquet"));
-        parquet::write_table(
-            &path,
-            &["user_id", "day", "sessions", "events", "revenue_cents", "top_category"],
-            &[ColumnView::Text(&u.user), ColumnView::Date(&u.day), ColumnView::Int32(&u.sessions), ColumnView::Int32(&u.events), ColumnView::Int64(&u.revenue), ColumnView::MaybeText(&u.top)],
-        )
-        .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(out.acc)
     });
     lg!(t0, "people", "people done, user_daily written");
