@@ -37,6 +37,8 @@ def sysinfo():
 
 
 def mem_budget_gb(info=None):
+    if os.environ.get("VCV_CI_MEM_GB"):
+        return int(os.environ["VCV_CI_MEM_GB"])
     info = info or sysinfo()
     return max(2, int(info["mem_gb"] - 1.5))
 
