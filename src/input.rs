@@ -3,38 +3,14 @@
 
 use crate::util::find_byte;
 use std::fs;
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
-mod os {
-    use std::ffi::c_void;
-    extern "C" {
-        #[link_name = "mmap"]
-        pub fn map_region(hint: *mut c_void, bytes: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut c_void;
-        #[link_name = "madvise"]
-        pub fn advise_region(start: *mut c_void, bytes: usize, advice: i32) -> i32;
-    }
-    pub const READABLE: i32 = 1;
-    pub const PRIVATE_COPY: i32 = 2;
-    pub const READ_AHEAD: i32 = 2;
-}
-
-/// The whole content of a file, valid until the process ends. An empty file gives an empty slice.
+/// The whole content of a file, valid until the process ends, followed by readable zero bytes.
+/// An empty file gives an empty slice.
 pub fn open_view(path: &Path) -> std::io::Result<&'static [u8]> {
     let file = fs::File::open(path)?;
     let bytes = file.metadata()?.len() as usize;
-    if bytes == 0 {
-        return Ok(&[]);
-    }
-    // SAFETY: the mapping is private and read-only and is never unmapped.
-    unsafe {
-        let base = os::map_region(std::ptr::null_mut(), bytes, os::READABLE, os::PRIVATE_COPY, file.as_raw_fd(), 0);
-        if base as isize == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        os::advise_region(base, bytes, os::READ_AHEAD);
-        Ok(std::slice::from_raw_parts(base as *const u8, bytes))
-    }
+    Ok(crate::os::file_bytes(&file, bytes))
 }
 
 /// Regular files named `*.csv` that sit directly in `dir`, in name order. No such directory: none.

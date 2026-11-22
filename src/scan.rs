@@ -65,7 +65,6 @@ impl Lens for Neon {
             let d = vandq_u8(vceqq_u8(v[3], want), bit);
             let s = vpaddq_u8(vpaddq_u8(a, b), vpaddq_u8(c2, d));
             let s = vpaddq_u8(s, s);
-            let s = vpaddq_u8(s, s);
             vgetq_lane_u64::<0>(vreinterpretq_u64_u8(s))
         }
         Marks { comma: gather(&v, b','), line: gather(&v, b'\n'), quote: gather(&v, b'"') }

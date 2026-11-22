@@ -100,6 +100,17 @@ pub struct Products {
     pub cat_of: Vec<u32>,
 }
 
+impl Products {
+    /// Category rank of a product; products missing from products.csv are `unknown`.
+    #[inline]
+    pub fn category(&self, product: &[u8]) -> u32 {
+        match self.map.get(product) {
+            Some(i) => self.cat_of[i as usize],
+            None => self.unknown,
+        }
+    }
+}
+
 pub fn read_products(dir: &Path) -> Result<Products, String> {
     let data = open_view(&dir.join("products.csv")).map_err(|e| format!("products.csv: {e}"))?;
     let mut rows: Vec<(&'static [u8], &'static [u8])> = Vec::new();
@@ -134,6 +145,11 @@ pub struct Campaigns {
 impl Campaigns {
     pub fn organic(&self) -> u32 {
         (self.rows.len() - 1) as u32
+    }
+    /// Index of a campaign listed in campaigns.csv.
+    #[inline]
+    pub fn find(&self, id: &[u8]) -> Option<u32> {
+        self.map.get(id)
     }
 }
 

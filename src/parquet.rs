@@ -54,6 +54,7 @@ impl MaybeTextColumn {
 /// One column of a table, borrowed from the builder that owns the values.
 pub enum ColumnView<'a> {
     Int64(&'a [i64]),
+    Int32(&'a [i32]),
     Date(&'a [i32]),
     Text(&'a TextColumn),
     MaybeText(&'a MaybeTextColumn),
@@ -63,6 +64,7 @@ impl ColumnView<'_> {
     fn len(&self) -> usize {
         match self {
             ColumnView::Int64(v) => v.len(),
+            ColumnView::Int32(v) => v.len(),
             ColumnView::Date(v) => v.len(),
             ColumnView::Text(c) => c.rows,
             ColumnView::MaybeText(c) => c.present.len(),
@@ -73,7 +75,7 @@ impl ColumnView<'_> {
     fn physical(&self) -> i32 {
         match self {
             ColumnView::Int64(_) => 2,
-            ColumnView::Date(_) => 1,
+            ColumnView::Date(_) | ColumnView::Int32(_) => 1,
             _ => 6,
         }
     }
@@ -87,7 +89,7 @@ impl ColumnView<'_> {
         let mut out = Vec::new();
         match self {
             ColumnView::Int64(v) => v[lo..hi].iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
-            ColumnView::Date(v) => v[lo..hi].iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
+            ColumnView::Date(v) | ColumnView::Int32(v) => v[lo..hi].iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
             ColumnView::Text(c) => out.extend_from_slice(slice_of_page(&c.bytes, &c.page_starts, p)),
             ColumnView::MaybeText(c) => {
                 // Definition levels: one bit-packed run of 1-bit values.
@@ -226,7 +228,7 @@ fn schema_entry(name: &str, col: &ColumnView) -> Vec<(i16, Tv)> {
             e.push((6, Tv::I32(6)));
             e.push((10, Tv::Struct(vec![(6, Tv::Struct(vec![]))])));
         }
-        ColumnView::Int64(_) => {}
+        ColumnView::Int64(_) | ColumnView::Int32(_) => {}
     }
     e
 }
