@@ -136,7 +136,9 @@ pub unsafe fn settle(lists: &[&[Suspect]], desk: &mut Desk, dates: &mut Dates, m
     table.resize(cap, FREE);
     for (i, s) in desk.again.iter().enumerate() {
         if let Some(ahead) = desk.again.get(i + 8) {
+            // The four fields read here can run into the row's second cache line.
             os::soon(ahead.row);
+            os::soon(ahead.row.wrapping_add(64));
         }
         let (id, id_len, ingest) = id_and_ingest(s.row, dates);
         let key = key_of(id, id_len);
