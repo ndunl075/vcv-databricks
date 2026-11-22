@@ -389,7 +389,7 @@ fn run() -> Result<(), String> {
 
 fn main() {
     match run() {
-        Ok(()) => os::quit(0),
+        Ok(()) => os::quit(3),
         Err(e) => {
             eprintln!("error: {e}");
             os::quit(1)
