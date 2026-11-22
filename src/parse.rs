@@ -1,7 +1,7 @@
 //! Line parsers for events, clicks and links.
 
 use crate::buckets::Buckets;
-use crate::csv::{for_each_line, split};
+use crate::csv::for_each_row;
 use crate::links::{IdRef, LinkRec};
 use crate::rec::*;
 use crate::ts::{price_cents, epoch_ms};
@@ -9,11 +9,7 @@ use crate::util::{hash128, DAY_MS};
 
 /// Parses event lines of one chunk into per-eshard buckets.
 pub fn parse_events(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: &mut [Buckets<Ev>]) {
-    for_each_line(data, s, e, |line| {
-        let mut f = [(0usize, 0usize); 7];
-        if !split::<7>(line, &mut f) {
-            return;
-        }
+    for_each_row::<7>(data, s, e, |line, f| {
         let eid = &line[f[0].0..f[0].1];
         if eid.is_empty() {
             return;
@@ -82,11 +78,7 @@ pub fn parse_events(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: 
 
 /// Parses click lines (valid clicks only); the person tag comes later.
 pub fn parse_clicks(cx: &Ctx, data: &'static [u8], s: usize, e: usize, out: &mut Buckets<SClick>) {
-    for_each_line(data, s, e, |line| {
-        let mut f = [(0usize, 0usize); 4];
-        if !split::<4>(line, &mut f) {
-            return;
-        }
+    for_each_row::<4>(data, s, e, |line, f| {
         let cid = &line[f[0].0..f[0].1];
         let user = &line[f[1].0..f[1].1];
         if cid.is_empty() || user.is_empty() {
@@ -108,11 +100,7 @@ pub fn parse_clicks(cx: &Ctx, data: &'static [u8], s: usize, e: usize, out: &mut
 
 /// Parses link lines: both sides non-empty.
 pub fn parse_links(data: &'static [u8], s: usize, e: usize, out: &mut Vec<LinkRec>) {
-    for_each_line(data, s, e, |line| {
-        let mut f = [(0usize, 0usize); 2];
-        if !split::<2>(line, &mut f) {
-            return;
-        }
+    for_each_row::<2>(data, s, e, |line, f| {
         let a = &line[f[0].0..f[0].1];
         let b = &line[f[1].0..f[1].1];
         if a.is_empty() || b.is_empty() {
