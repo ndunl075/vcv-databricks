@@ -57,6 +57,19 @@ impl LinkTable {
         LinkTable { slots: vec![[0; 3]; 1], mask: 0, comps: Vec::new() }
     }
 
+    /// Hints the CPU to load the table slot an upcoming `get(lo, ..)` will probe first.
+    #[inline(always)]
+    pub fn prefetch(&self, lo: u64) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            let i = (lo as usize) & self.mask;
+            _mm_prefetch(self.slots.as_ptr().add(i) as *const i8, _MM_HINT_T0);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = lo;
+    }
+
     /// Component index of an ID that appears in some link line.
     #[inline]
     pub fn get(&self, lo: u64, hi: u64) -> Option<u32> {

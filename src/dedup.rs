@@ -22,24 +22,28 @@ pub fn dedup(bufs: &[Buckets<Ev>]) -> Vec<Ev> {
     let total: usize = bufs.iter().map(|b| b.len()).sum();
     let cap = (total * 2).next_power_of_two().max(16);
     let mask = cap - 1;
-    let mut table = vec![0u32; cap];
+    // Slot: high half a tag taken from the hash, low half the index of the kept record plus one.
+    let mut table = vec![0u64; cap];
     let mut kept: Vec<Ev> = Vec::with_capacity(total);
     for b in bufs.iter().flat_map(|b| b.blocks()) {
         for r in b {
+            let tag = (r.eh >> 20) & 0xffff_ffff;
             let mut i = (r.eh as usize) & mask;
             loop {
                 let t = table[i];
                 if t == 0 {
                     kept.push(*r);
-                    table[i] = kept.len() as u32;
+                    table[i] = (tag << 32) | kept.len() as u64;
                     break;
                 }
-                let k = &mut kept[(t - 1) as usize];
-                if k.eh == r.eh && same_id(k.ep, r.ep) {
-                    if better(r, k) == Ordering::Less {
-                        *k = *r;
+                if t >> 32 == tag {
+                    let k = &mut kept[((t & 0xffff_ffff) - 1) as usize];
+                    if k.eh == r.eh && same_id(k.ep, r.ep) {
+                        if better(r, k) == Ordering::Less {
+                            *k = *r;
+                        }
+                        break;
                     }
-                    break;
                 }
                 i = (i + 1) & mask;
             }

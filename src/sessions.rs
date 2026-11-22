@@ -1,10 +1,10 @@
 //! Per-person sessionization, attribution and aggregation (one person-shard at a time).
 
 use crate::acc::CampAcc;
+use crate::buckets::Buckets;
 use crate::parquet::{MaybeTextColumn, TextColumn};
 use crate::rec::*;
 use crate::util::{field_at, floor_div, DAY_MS, GAP_MS, WEEK_MS};
-use std::cmp::Ordering;
 
 /// user_daily rows built by one worker, column by column.
 #[derive(Default)]
@@ -34,32 +34,158 @@ pub struct Out {
     pub acc: CampAcc,
 }
 
-fn click_cmp(a: &SClick, b: &SClick) -> Ordering {
-    (a.lo, a.hi, a.ts).cmp(&(b.lo, b.hi, b.ts)).then_with(|| unsafe { field_at(a.cid).cmp(field_at(b.cid)) })
+/// Maps a person key to a small per-shard number; grows as persons arrive.
+#[derive(Default)]
+struct PersonIndex {
+    slots: Vec<u32>,
+    keys: Vec<(u64, u64)>,
 }
 
-/// Sorts and processes all events and clicks of one shard.
-pub fn process_shard(cx: &Ctx, evs: &mut [SEv], clicks: &mut [SClick], scr: &mut Scratch, out: &mut Out) {
-    evs.sort_unstable_by(|a, b| (a.lo, a.hi, a.ts).cmp(&(b.lo, b.hi, b.ts)));
-    clicks.sort_unstable_by(click_cmp);
-    let mut ci = 0usize;
-    let mut i = 0usize;
-    while i < evs.len() {
-        let (lo, hi) = (evs[i].lo, evs[i].hi);
-        let mut j = i + 1;
-        while j < evs.len() && evs[j].lo == lo && evs[j].hi == hi {
-            j += 1;
+impl PersonIndex {
+    fn reset(&mut self) {
+        self.slots.clear();
+        self.slots.resize(1024, 0);
+        self.keys.clear();
+    }
+
+    #[inline]
+    fn find(&self, lo: u64, hi: u64) -> Option<u32> {
+        let mask = self.slots.len() - 1;
+        let mut i = lo as usize & mask;
+        loop {
+            let v = self.slots[i];
+            if v == 0 {
+                return None;
+            }
+            if self.keys[(v - 1) as usize] == (lo, hi) {
+                return Some(v - 1);
+            }
+            i = (i + 1) & mask;
         }
-        while ci < clicks.len() && (clicks[ci].lo, clicks[ci].hi) < (lo, hi) {
-            ci += 1;
+    }
+
+    #[inline]
+    fn find_or_add(&mut self, lo: u64, hi: u64) -> u32 {
+        let mask = self.slots.len() - 1;
+        let mut i = lo as usize & mask;
+        loop {
+            let v = self.slots[i];
+            if v == 0 {
+                break;
+            }
+            if self.keys[(v - 1) as usize] == (lo, hi) {
+                return v - 1;
+            }
+            i = (i + 1) & mask;
         }
-        let mut ce = ci;
-        while ce < clicks.len() && clicks[ce].lo == lo && clicks[ce].hi == hi {
-            ce += 1;
+        let id = self.keys.len() as u32;
+        self.keys.push((lo, hi));
+        self.slots[i] = id + 1;
+        if self.keys.len() * 2 > self.slots.len() {
+            let cap = self.slots.len() * 2;
+            self.slots.clear();
+            self.slots.resize(cap, 0);
+            for (n, k) in self.keys.iter().enumerate() {
+                let mut j = k.0 as usize & (cap - 1);
+                while self.slots[j] != 0 {
+                    j = (j + 1) & (cap - 1);
+                }
+                self.slots[j] = n as u32 + 1;
+            }
         }
-        person(cx, &evs[i..j], &clicks[ci..ce], scr, out);
-        ci = ce;
-        i = j;
+        id
+    }
+}
+
+/// Working memory for one person shard, reused from shard to shard.
+#[derive(Default)]
+pub struct ShardBuf {
+    index: PersonIndex,
+    ev_person: Vec<u32>,
+    ck_person: Vec<u32>,
+    ev_at: Vec<u32>,
+    ck_at: Vec<u32>,
+    evs: Vec<SEv>,
+    cks: Vec<SClick>,
+}
+
+fn prefix_sums(counts: &mut Vec<u32>) {
+    let mut run = 0u32;
+    for c in counts.iter_mut() {
+        let n = *c;
+        *c = run;
+        run += n;
+    }
+    counts.push(run);
+}
+
+/// Groups the shard's events and clicks by person (counting sort), orders each person's rows by
+/// time, and runs every person.
+pub fn process_shard(cx: &Ctx, eb: &[Buckets<SEv>], cb: &[Buckets<SClick>], buf: &mut ShardBuf, scr: &mut Scratch, out: &mut Out) {
+    let n_ev: usize = eb.iter().map(|b| b.len()).sum();
+    if n_ev == 0 {
+        return;
+    }
+    buf.index.reset();
+    buf.ev_person.clear();
+    buf.ev_at.clear();
+    for e in eb.iter().flat_map(|b| b.blocks()).flatten() {
+        let id = buf.index.find_or_add(e.lo, e.hi);
+        if id as usize == buf.ev_at.len() {
+            buf.ev_at.push(0);
+        }
+        buf.ev_at[id as usize] += 1;
+        buf.ev_person.push(id);
+    }
+    let persons = buf.index.keys.len();
+    buf.ck_at.clear();
+    buf.ck_at.resize(persons, 0);
+    buf.ck_person.clear();
+    for c in cb.iter().flat_map(|b| b.blocks()).flatten() {
+        match buf.index.find(c.lo, c.hi) {
+            Some(id) => {
+                buf.ck_at[id as usize] += 1;
+                buf.ck_person.push(id);
+            }
+            None => buf.ck_person.push(u32::MAX),
+        }
+    }
+    prefix_sums(&mut buf.ev_at);
+    prefix_sums(&mut buf.ck_at);
+    let (ev_end, ck_end) = (buf.ev_at[persons] as usize, buf.ck_at[persons] as usize);
+    // Every slot below is written exactly once before it is read.
+    buf.evs.clear();
+    buf.evs.reserve(ev_end);
+    buf.cks.clear();
+    buf.cks.reserve(ck_end);
+    let mut cursor: Vec<u32> = buf.ev_at[..persons].to_vec();
+    let evs_ptr = buf.evs.as_mut_ptr();
+    for (e, &id) in eb.iter().flat_map(|b| b.blocks()).flatten().zip(&buf.ev_person) {
+        let at = &mut cursor[id as usize];
+        unsafe { evs_ptr.add(*at as usize).write(*e) };
+        *at += 1;
+    }
+    unsafe { buf.evs.set_len(ev_end) };
+    cursor.clear();
+    cursor.extend_from_slice(&buf.ck_at[..persons]);
+    let cks_ptr = buf.cks.as_mut_ptr();
+    for (c, &id) in cb.iter().flat_map(|b| b.blocks()).flatten().zip(&buf.ck_person) {
+        if id != u32::MAX {
+            let at = &mut cursor[id as usize];
+            unsafe { cks_ptr.add(*at as usize).write(*c) };
+            *at += 1;
+        }
+    }
+    unsafe { buf.cks.set_len(ck_end) };
+
+    for id in 0..persons {
+        let evs = &mut buf.evs[buf.ev_at[id] as usize..buf.ev_at[id + 1] as usize];
+        let cks = &mut buf.cks[buf.ck_at[id] as usize..buf.ck_at[id + 1] as usize];
+        evs.sort_unstable_by_key(|e| e.ts);
+        if cks.len() > 1 {
+            cks.sort_unstable_by(|a, b| a.ts.cmp(&b.ts).then_with(|| unsafe { field_at(a.cid).cmp(field_at(b.cid)) }));
+        }
+        person(cx, evs, cks, scr, out);
     }
 }
 

@@ -177,7 +177,11 @@ fn run() -> Result<(), String> {
                 break;
             }
             if t >= es {
-                for c in &raw_clicks[t - es] {
+                let blk = &raw_clicks[t - es];
+                for (n, c) in blk.iter().enumerate() {
+                    if let Some(ahead) = blk.get(n + 12) {
+                        cx.links.prefetch(ahead.lo);
+                    }
                     let (lo, hi, _) = cx.person(c.lo, c.hi, 0);
                     cb[cx.pshard(lo)].push(SClick { lo, hi, ..*c });
                 }
@@ -186,7 +190,10 @@ fn run() -> Result<(), String> {
             let bufs = std::mem::take(&mut *e_shards[t].lock().unwrap());
             let kept = dedup::dedup(&bufs);
             drop(bufs);
-            for k in &kept {
+            for (n, k) in kept.iter().enumerate() {
+                if let Some(ahead) = kept.get(n + 12) {
+                    cx.links.prefetch(ahead.ulo);
+                }
                 if k.ep & OK_BIT == 0 {
                     continue;
                 }
@@ -240,8 +247,7 @@ fn run() -> Result<(), String> {
     let results: Vec<Result<CampAcc, String>> = par(threads, |w| {
         let mut out = Out { users: UserCols::default(), acc: CampAcc::new(ncamp, day0, ndays) };
         let mut scr = Scratch::default();
-        let mut evs: Vec<SEv> = Vec::new();
-        let mut cks: Vec<SClick> = Vec::new();
+        let mut buf = sessions::ShardBuf::default();
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
             if i >= ps {
@@ -250,19 +256,7 @@ fn run() -> Result<(), String> {
             let s = order[i];
             let eb = std::mem::take(&mut *p_shards[s].lock().unwrap());
             let cb = std::mem::take(&mut *c_shards[s].lock().unwrap());
-            evs.clear();
-            cks.clear();
-            for b in eb.iter().flat_map(|b| b.blocks()) {
-                evs.extend_from_slice(b);
-            }
-            for b in cb.iter().flat_map(|b| b.blocks()) {
-                cks.extend_from_slice(b);
-            }
-            drop(eb);
-            drop(cb);
-            if !evs.is_empty() {
-                sessions::process_shard(&cx, &mut evs, &mut cks, &mut scr, &mut out);
-            }
+            sessions::process_shard(&cx, &eb, &cb, &mut buf, &mut scr, &mut out);
         }
         let u = &out.users;
         if u.day.is_empty() && w != 0 {

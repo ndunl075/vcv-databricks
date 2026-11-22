@@ -70,15 +70,21 @@ pub fn for_each_line<'a>(data: &'a [u8], start: usize, end: usize, mut f: impl F
 // ---------------------------------------------------------------------------------------------
 // One-pass row reader.
 
-/// Bytes examined per step, and a bit mask of the delimiters (`,` `"` `\n`) among them.
-#[cfg(target_arch = "x86_64")]
+/// Bytes examined per step; `delimiters` returns one set bit per `,` `"` `\n` among them, at bit
+/// `index << LANE_SHIFT`.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const STEP: usize = 16;
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const STEP: usize = 8;
+
+#[cfg(target_arch = "aarch64")]
+const LANE_SHIFT: u32 = 2;
+#[cfg(not(target_arch = "aarch64"))]
+const LANE_SHIFT: u32 = 0;
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-fn delimiters(hay: &[u8], at: usize) -> u32 {
+fn delimiters(hay: &[u8], at: usize) -> u64 {
     use std::arch::x86_64::*;
     debug_assert!(at + STEP <= hay.len());
     // SAFETY: the caller guarantees 16 readable bytes at `at`; SSE2 is part of the x86-64 baseline.
@@ -88,17 +94,31 @@ fn delimiters(hay: &[u8], at: usize) -> u32 {
             _mm_or_si128(_mm_cmpeq_epi8(x, _mm_set1_epi8(b',' as i8)), _mm_cmpeq_epi8(x, _mm_set1_epi8(b'"' as i8))),
             _mm_cmpeq_epi8(x, _mm_set1_epi8(b'\n' as i8)),
         );
-        _mm_movemask_epi8(hit) as u32
+        _mm_movemask_epi8(hit) as u32 as u64
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
 #[inline(always)]
-fn delimiters(hay: &[u8], at: usize) -> u32 {
+fn delimiters(hay: &[u8], at: usize) -> u64 {
+    use std::arch::aarch64::*;
+    debug_assert!(at + STEP <= hay.len());
+    // SAFETY: the caller guarantees 16 readable bytes at `at`; NEON is part of the aarch64 baseline.
+    unsafe {
+        let x = vld1q_u8(hay.as_ptr().add(at));
+        let hit = vorrq_u8(vorrq_u8(vceqq_u8(x, vdupq_n_u8(b',')), vceqq_u8(x, vdupq_n_u8(b'"'))), vceqq_u8(x, vdupq_n_u8(b'\n')));
+        let nibbles = vshrn_n_u16::<4>(vreinterpretq_u16_u8(hit));
+        vget_lane_u64::<0>(vreinterpret_u64_u8(nibbles)) & 0x8888_8888_8888_8888
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[inline(always)]
+fn delimiters(hay: &[u8], at: usize) -> u64 {
     use crate::util::{eqmask, rd64};
     let w = rd64(hay, at);
     let m = eqmask(w, b',') | eqmask(w, b'"') | eqmask(w, b'\n');
-    (((m >> 7).wrapping_mul(0x0102_0408_1020_4080)) >> 56) as u32
+    (((m >> 7).wrapping_mul(0x0102_0408_1020_4080)) >> 56) as u64
 }
 
 struct RowState<const N: usize> {
@@ -198,7 +218,7 @@ pub fn for_each_row<'a, const N: usize>(data: &'a [u8], start: usize, end: usize
     while at + STEP <= end {
         let mut m = delimiters(hay, at);
         while m != 0 {
-            let p = at + m.trailing_zeros() as usize;
+            let p = at + (m.trailing_zeros() >> LANE_SHIFT) as usize;
             m &= m - 1;
             st.delimiter(data, p, hay[p], &mut emit);
         }
