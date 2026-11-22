@@ -217,9 +217,59 @@ fn dict_texts(bytes: &[u8], count: usize) -> Option<Dict> {
     Some(Dict { values, n, width: width_for(n), idx })
 }
 
-/// Integer values as a dictionary of `size`-byte plain values, or None when they barely repeat.
-fn dict_ints(v: impl Iterator<Item = i64>, count: usize, size: usize) -> Option<Dict> {
+/// Text values as a dictionary with one entry per run of equal neighbours, without hashing. The
+/// user table holds each user's rows together and each user once, so its runs are its distinct
+/// values; any other column only risks a repeated dictionary entry, which readers accept.
+fn dict_text_runs(bytes: &[u8], count: usize) -> Option<Dict> {
     let limit = dict_limit(count);
+    let mut values = Vec::with_capacity(bytes.len() / 2);
+    let mut idx = Vec::with_capacity(count);
+    let mut prev: &[u8] = &[];
+    let mut n = 0u32;
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let v = &bytes[at + 4..at + 4 + len];
+        if n == 0 || v != prev {
+            if n as usize >= limit {
+                return None;
+            }
+            values.extend_from_slice(&bytes[at..at + 4 + len]);
+            prev = v;
+            n += 1;
+        }
+        idx.push(n - 1);
+        at += 4 + len;
+    }
+    let n = n as usize;
+    Some(Dict { values, n, width: width_for(n), idx })
+}
+
+/// Integer values as a dictionary of `size`-byte plain values, or None when they barely repeat.
+fn dict_ints(v: impl Iterator<Item = i64> + Clone, count: usize, size: usize) -> Option<Dict> {
+    let limit = dict_limit(count);
+    let (lo, hi) = v.clone().fold((i64::MAX, i64::MIN), |(a, b), x| (a.min(x), b.max(x)));
+    if count > 0 && (hi as i128 - lo as i128) < (1 << 16) {
+        // Small range: a direct table from value to index.
+        let mut slot = vec![u32::MAX; (hi - lo) as usize + 1];
+        let mut values = Vec::new();
+        let mut idx = Vec::with_capacity(count);
+        let mut n = 0u32;
+        for x in v {
+            let s = &mut slot[(x - lo) as usize];
+            if *s == u32::MAX {
+                *s = n;
+                n += 1;
+                values.extend_from_slice(&x.to_le_bytes()[..size]);
+            }
+            idx.push(*s);
+        }
+        if n as usize > limit {
+            return None;
+        }
+        let n = n as usize;
+        return Some(Dict { values, n, width: width_for(n), idx });
+    }
     let mut map: MixMap<i64> = MixMap::default();
     let mut values = Vec::new();
     let mut idx = Vec::with_capacity(count);
@@ -299,7 +349,7 @@ impl ColumnView<'_> {
         let d = match self {
             ColumnView::Int64(v) => dict_ints(v.iter().map(|&x| x), rows, 8)?,
             ColumnView::Int32(v) | ColumnView::Date(v) => dict_ints(v.iter().map(|&x| x as i64), rows, 4)?,
-            ColumnView::Text(c) => dict_texts(&c.bytes, c.rows)?,
+            ColumnView::Text(c) => dict_text_runs(&c.bytes, c.rows)?,
             ColumnView::MaybeText(c) => dict_texts(&c.bytes, c.present.iter().filter(|&&f| f != 0).count())?,
         };
         let plain = match self {
