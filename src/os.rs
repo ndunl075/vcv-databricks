@@ -1,0 +1,114 @@
+//! The handful of system calls std does not offer: memory regions, paging advice, a hard exit,
+//! and cache-line prefetch hints.
+
+use std::ffi::c_void;
+use std::fs::File;
+use std::os::fd::AsRawFd;
+
+mod sys {
+    use std::ffi::c_void;
+    extern "C" {
+        #[link_name = "mmap"]
+        pub fn region(hint: *mut c_void, bytes: usize, access: i32, kind: i32, fd: i32, at: i64) -> *mut c_void;
+        #[link_name = "madvise"]
+        pub fn advise(start: *mut c_void, bytes: usize, what: i32) -> i32;
+        #[link_name = "_exit"]
+        pub fn leave(code: i32) -> !;
+    }
+    pub const CAN_READ: i32 = 1;
+    pub const CAN_WRITE: i32 = 2;
+    pub const OWN_COPY: i32 = 2;
+    pub const IN_PLACE: i32 = 0x10;
+    #[cfg(target_os = "linux")]
+    pub const NO_FILE: i32 = 0x20;
+    #[cfg(not(target_os = "linux"))]
+    pub const NO_FILE: i32 = 0x1000;
+    pub const DROP_PAGES: i32 = 4;
+    #[cfg(target_os = "linux")]
+    pub const BIG_PAGES: i32 = 14;
+}
+
+/// Bytes of zero padding guaranteed readable after every mapped file.
+pub const TAIL: usize = 1 << 16;
+
+fn fail(what: &str) -> ! {
+    eprintln!("error: {what}: {}", std::io::Error::last_os_error());
+    std::process::exit(1)
+}
+
+/// `bytes` of zeroed, writable memory that lives until the process ends. Large regions ask for
+/// huge pages where the system offers them on request.
+pub fn zeroed(bytes: usize) -> *mut u8 {
+    let bytes = bytes.max(1).next_multiple_of(TAIL);
+    // SAFETY: a fresh private anonymous mapping.
+    unsafe {
+        let p = sys::region(std::ptr::null_mut(), bytes, sys::CAN_READ | sys::CAN_WRITE, sys::OWN_COPY | sys::NO_FILE, -1, 0);
+        if p as isize == -1 {
+            fail("memory region");
+        }
+        #[cfg(target_os = "linux")]
+        if bytes >= 4 << 20 {
+            sys::advise(p, bytes, sys::BIG_PAGES);
+        }
+        p as *mut u8
+    }
+}
+
+/// Typed, zeroed array of `n` items (see `zeroed`). `T` must be valid when all its bytes are zero.
+pub fn zeroed_array<T>(n: usize) -> *mut T {
+    zeroed(n * std::mem::size_of::<T>()) as *mut T
+}
+
+/// The whole file as bytes, followed by at least `TAIL` readable zero bytes. Never unmapped.
+pub fn file_bytes(file: &File, bytes: usize) -> &'static [u8] {
+    if bytes == 0 {
+        return &[];
+    }
+    let span = bytes.next_multiple_of(TAIL) + TAIL;
+    // SAFETY: reserve a read-only zero region, then lay the file over its start.
+    unsafe {
+        let base = sys::region(std::ptr::null_mut(), span, sys::CAN_READ, sys::OWN_COPY | sys::NO_FILE, -1, 0);
+        if base as isize == -1 {
+            fail("address space for input");
+        }
+        let got = sys::region(base, bytes, sys::CAN_READ, sys::OWN_COPY | sys::IN_PLACE, file.as_raw_fd(), 0);
+        if got as isize == -1 {
+            fail("mapping input");
+        }
+        std::slice::from_raw_parts(base as *const u8, bytes)
+    }
+}
+
+/// Gives the pages of a region back (contents are lost or reloaded on the next touch).
+#[allow(dead_code)]
+pub fn release(start: *const u8, bytes: usize) {
+    if bytes > 0 {
+        // SAFETY: advice only; the range belongs to a mapping made by this module.
+        unsafe {
+            sys::advise(start as *mut c_void, bytes, sys::DROP_PAGES);
+        }
+    }
+}
+
+/// Ends the process at once: no destructors, no unwinding, no flushing.
+pub fn quit(code: i32) -> ! {
+    // SAFETY: plain process exit.
+    unsafe { sys::leave(code) }
+}
+
+/// Hint that the cache line at `p` will be used soon. Never faults.
+#[inline(always)]
+pub fn soon<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: prefetch is a hint and accepts any address.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(p as *const i8, std::arch::x86_64::_MM_HINT_T0);
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: prefetch is a hint and accepts any address.
+    unsafe {
+        std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, preserves_flags, readonly));
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    let _ = p;
+}
