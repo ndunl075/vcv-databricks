@@ -49,13 +49,13 @@ L = ["## Rivals vs ours on real x86 (%s events, seed %s)" % (format(ev, ","), ro
      "Each rival: exact commit built from its public repo, run 3x per dataset under the scorer's flags (no network, read-only root, uid 1000), "
      "alongside our image on the same VM. Wall time = container start to exit. Real-x86 ratios on small runners, **not** the scorer's absolute times.",
      "", "Runners seen: " + "; ".join(cpus), "",
-     "| # | entry | stock med s | stock best | reshuffled med s | reshuffled best | exact stock | exact reshuffled | reshuffled vs ours (same VM) | notes |",
-     "|---|---|---|---|---|---|---|---|---|---|"]
+     "| # | entry | stock med s | stock best | reshuffled med s | reshuffled best | exact stock | exact reshuffled | stock vs ours (same VM) | reshuffled vs ours (same VM) | runner | notes |",
+     "|---|---|---|---|---|---|---|---|---|---|---|---|"]
 entries = [(ours_row["remap"]["median"], None, ours_row)] + [(t["remap"]["median"], t, None) for t in table]
 entries.sort(key=lambda e: (e[0] is None, e[0] or 0))
 for i, (_, t, o) in enumerate(entries, 1):
     if o:
-        L.append("| %d | **%s** | %s | %s | %s | %s | reference | reference | 1.00 | median over every VM |" % (
+        L.append("| %d | **%s** | %s | %s | %s | %s | reference | reference | 1.00 | 1.00 | mixed CPUs: read the ratio columns | median over all VMs |" % (
             i, o["repo"], f(o["stock"]["median"]), f(o["stock"]["best"]), f(o["remap"]["median"]), f(o["remap"]["best"])))
         continue
     notes = []
@@ -69,8 +69,11 @@ for i, (_, t, o) in enumerate(entries, 1):
         if x["exit"] not in (0, None) and not (x["sigill"] or x["oom"] or x["timed_out"]):
             notes.append("exit %s on %s" % (x["exit"], ds))
     vs = t["remap"]["vs_ours"]
-    L.append("| %d | %s `%s` | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+    vs0 = t["stock"]["vs_ours"]
+    cpu = t["cpu"].replace("Intel(R) Xeon(R) ", "Xeon ").replace("AMD ", "").replace("-Core Processor", "c").replace("Processor", "")
+    L.append("| %d | %s `%s` | %s | %s | %s | %s | %s | %s | %s | %s | %s%s | %s |" % (
         i, t["repo"], t["sha"], f(t["stock"]["median"]), f(t["stock"]["best"]), f(t["remap"]["median"]), f(t["remap"]["best"]),
-        t["stock"]["exact"], t["remap"]["exact"], "-" if vs is None else "%.2fx" % vs, "; ".join(notes) or ""))
+        t["stock"]["exact"], t["remap"]["exact"], "-" if vs0 is None else "%.2fx" % vs0, "-" if vs is None else "%.2fx" % vs,
+        cpu.strip(), "" if t["avx512bw"] else " (no AVX-512)", "; ".join(notes) or ""))
 open(out_md, "w").write("\n".join(L) + "\n")
 print("\n".join(L))
