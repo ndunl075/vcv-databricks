@@ -2,9 +2,9 @@
 //!
 //! Every person gets a seat: the lead user number, scrambled by a fixed odd multiplier so that
 //! busy people spread evenly. The high bits of the seat pick a shard, the low bits number the
-//! person inside it. Two sweeps over the records: `tally` turns user numbers into seats, counts
-//! the rows per shard and lists the dedup suspects; `deal` copies the rows into one array per
-//! kind, shard after shard, through small per-shard buffers so each write is a full cache line.
+//! person inside it. One sweep over the records deals every row that needs no dedup into its
+//! shard's blocks, through a small per-shard buffer so each write is a full cache line, and
+//! lists the dedup suspects; the suspects that survive dedup are dealt the same way afterwards.
 
 use crate::dedup::{group_of, Suspect, GROUPS};
 use crate::os;
@@ -47,132 +47,110 @@ impl Seating {
     }
 }
 
-/// What one thread found in its share of the records.
-pub struct Tally {
-    pub events: Vec<u32>,
-    pub clicks: Vec<u32>,
-    pub suspects: Vec<Vec<Suspect>>,
-    /// Indices of the runs this thread tallied; it deals the same ones.
-    pub event_runs: Vec<usize>,
-    pub click_runs: Vec<usize>,
-}
-
-impl Tally {
-    pub fn new(shards: usize) -> Tally {
-        Tally { events: vec![0; shards], clicks: vec![0; shards], suspects: (0..GROUPS).map(|_| Vec::new()).collect(), event_runs: Vec::new(), click_runs: Vec::new() }
-    }
-}
-
-const AHEAD: usize = 16;
-
-/// # Safety
-/// The run must be live and untouched by other threads; `lead` must cover every user number.
-pub unsafe fn tally_events(run: &Run<Ev>, cells: &Cells, lead: &[u32], seats: &Seating, t: &mut Tally) {
-    let shift = seats.local_bits;
-    for i in 0..run.n {
-        let r = run.first.add(i);
-        if i + AHEAD < run.n {
-            let next = &*run.first.add(i + AHEAD);
-            os::soon(cells.word_of(next.tag));
-            if next.who != NOBODY {
-                os::soon(lead.as_ptr().add(next.who as usize));
-            }
-        }
-        let tag = (*r).tag;
-        if cells.crowded(tag) {
-            t.suspects.get_unchecked_mut(group_of(tag)).push(Suspect { rec: r, row: run.base.add((*r).at as usize) });
-        }
-        let who = (*r).who;
-        if who != NOBODY {
-            let seat = seats.seat(*lead.get_unchecked(who as usize));
-            (*r).who = seat;
-            *t.events.get_unchecked_mut((seat >> shift) as usize) += 1;
-        }
-    }
-}
-
-/// # Safety
-/// As `tally_events`.
-pub unsafe fn tally_clicks(run: &Run<Ck>, lead: &[u32], seats: &Seating, t: &mut Tally) {
-    let shift = seats.local_bits;
-    for i in 0..run.n {
-        let r = run.first.add(i);
-        if i + AHEAD < run.n {
-            os::soon(lead.as_ptr().add((*run.first.add(i + AHEAD)).who as usize));
-        }
-        let seat = seats.seat(*lead.get_unchecked((*r).who as usize));
-        (*r).who = seat;
-        *t.clicks.get_unchecked_mut((seat >> shift) as usize) += 1;
-    }
-}
-
-/// Where each thread's rows of each shard go: `at[thread][shard]` is an index into the dealt
-/// array, always a multiple of four rows (one cache line).
-pub struct Layout {
-    pub at: Vec<Vec<usize>>,
-    pub total: usize,
-}
-
-impl Layout {
-    pub fn new(counts: &[&[u32]], shards: usize) -> Layout {
-        let mut at: Vec<Vec<usize>> = counts.iter().map(|_| Vec::with_capacity(shards)).collect();
-        let mut next = 0usize;
-        for s in 0..shards {
-            for (t, c) in counts.iter().enumerate() {
-                at[t].push(next);
-                next += (c[s] as usize).next_multiple_of(4);
-            }
-        }
-        Layout { at, total: next }
-    }
-}
-
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct Line([u64; 8]);
 
-/// One thread's buffers for dealing: a cache line per shard.
+/// Rows per block of dealt rows (16 cache lines).
+const BLOCK_ROWS: usize = 64;
+/// Blocks taken from the system at a time.
+const BLOCKS_PER_GRAB: usize = 8192;
+
+/// A filled (or partly filled) block of one shard's rows.
+#[derive(Clone, Copy)]
+pub struct Block {
+    pub shard: u32,
+    pub n: u32,
+    pub at: *const Row,
+}
+
+/// One thread's dealing of one kind of row: per shard a cache line being filled and a block
+/// being written, so each write to the far-away blocks is a whole line.
 pub struct Dealer {
     lines: Vec<Line>,
-    cursor: Vec<usize>,
+    /// Next free row of each shard's current block (null before the first row).
+    next: Vec<*mut Row>,
+    end: Vec<*mut Row>,
+    pub blocks: Vec<Block>,
+    spare: *mut Row,
+    spare_blocks: usize,
 }
 
 impl Dealer {
     pub fn new(shards: usize) -> Dealer {
-        Dealer { lines: vec![Line([0; 8]); shards], cursor: vec![0; shards] }
+        Dealer { lines: vec![Line([0; 8]); shards], next: vec![std::ptr::null_mut(); shards], end: vec![std::ptr::null_mut(); shards], blocks: Vec::new(), spare: std::ptr::null_mut(), spare_blocks: 0 }
     }
 
-    fn start(&mut self, at: &[usize]) {
-        self.cursor.copy_from_slice(at);
+    #[cold]
+    #[inline(never)]
+    fn new_block(&mut self, shard: usize) -> *mut Row {
+        let old_end = self.end[shard];
+        if !old_end.is_null() {
+            // SAFETY: the block starts BLOCK_ROWS before its end.
+            self.blocks.push(Block { shard: shard as u32, n: BLOCK_ROWS as u32, at: unsafe { old_end.sub(BLOCK_ROWS) } });
+        }
+        if self.spare_blocks == 0 {
+            self.spare = os::zeroed_array::<Row>(BLOCK_ROWS * BLOCKS_PER_GRAB);
+            self.spare_blocks = BLOCKS_PER_GRAB;
+        }
+        let at = self.spare;
+        // SAFETY: the grab holds `spare_blocks` more blocks.
+        unsafe {
+            self.spare = at.add(BLOCK_ROWS);
+            self.end[shard] = at.add(BLOCK_ROWS);
+        }
+        self.spare_blocks -= 1;
+        at
     }
 
+    /// Adds a row to a shard.
     #[inline(always)]
-    unsafe fn put(&mut self, out: *mut Row, shard: usize, row: Row) {
-        let c = *self.cursor.get_unchecked(shard);
-        let line = self.lines.get_unchecked_mut(shard);
-        let k = c & 3;
-        *line.0.get_unchecked_mut(k * 2) = row[0];
-        *line.0.get_unchecked_mut(k * 2 + 1) = row[1];
-        *self.cursor.get_unchecked_mut(shard) = c + 1;
-        if k == 3 {
-            send_line(out.add(c - 3) as *mut u8, line);
+    pub fn put(&mut self, shard: usize, row: Row) {
+        // SAFETY: `shard` is below the shard count; blocks are 64-byte aligned, so the low bits
+        // of a row address say which quarter of its cache line it is.
+        unsafe {
+            let mut at = *self.next.get_unchecked(shard);
+            if at == *self.end.get_unchecked(shard) {
+                at = self.new_block(shard);
+            }
+            let k = (at as usize >> 4) & 3;
+            let line = self.lines.get_unchecked_mut(shard);
+            *line.0.get_unchecked_mut(k * 2) = row[0];
+            *line.0.get_unchecked_mut(k * 2 + 1) = row[1];
+            *self.next.get_unchecked_mut(shard) = at.add(1);
+            if k == 3 {
+                send_line(at.sub(3) as *mut u8, line);
+            }
         }
     }
 
-    /// Writes out the partly filled lines; returns how many rows each shard received.
-    unsafe fn finish(&mut self, out: *mut Row, at: &[usize]) -> Vec<u32> {
-        let mut got = Vec::with_capacity(at.len());
-        for (s, &start) in at.iter().enumerate() {
-            let c = self.cursor[s];
-            let k = c & 3;
-            if k > 0 {
-                std::ptr::copy_nonoverlapping(self.lines[s].0.as_ptr() as *const Row, out.add(c - k), k);
+    /// Writes out the partly filled lines and closes every block.
+    pub fn finish(&mut self) {
+        for s in 0..self.lines.len() {
+            let at = self.next[s];
+            if at.is_null() {
+                continue;
             }
-            got.push((c - start) as u32);
+            // SAFETY: the pointers lie in this shard's current block.
+            unsafe {
+                let k = (at as usize >> 4) & 3;
+                if k > 0 {
+                    std::ptr::copy_nonoverlapping(self.lines[s].0.as_ptr() as *const Row, at.sub(k), k);
+                }
+                let start = self.end[s].sub(BLOCK_ROWS);
+                let n = at.offset_from(start) as usize;
+                if n > 0 {
+                    self.blocks.push(Block { shard: s as u32, n: n as u32, at: start });
+                }
+            }
+            self.next[s] = std::ptr::null_mut();
+            self.end[s] = std::ptr::null_mut();
         }
         #[cfg(target_arch = "x86_64")]
-        std::arch::x86_64::_mm_sfence();
-        got
+        // SAFETY: plain store fence after the streaming stores.
+        unsafe {
+            std::arch::x86_64::_mm_sfence()
+        };
     }
 }
 
@@ -193,52 +171,133 @@ unsafe fn send_line(to: *mut u8, line: &Line) {
     std::ptr::copy_nonoverlapping(line.0.as_ptr() as *const u8, to, 64);
 }
 
+/// All dealt rows of one kind, shard by shard.
+pub struct Dealt {
+    blocks: Vec<(*const Row, u32)>,
+    /// Blocks of shard `s` are `blocks[first[s]..first[s + 1]]`.
+    first: Vec<u32>,
+    rows: Vec<u32>,
+}
+
+// SAFETY: the blocks are only read once dealing is over.
+unsafe impl Sync for Dealt {}
+
+impl Dealt {
+    pub fn new(lists: &[&[Block]], shards: usize) -> Dealt {
+        let mut first = vec![0u32; shards + 1];
+        let mut rows = vec![0u32; shards];
+        for b in lists.iter().flat_map(|l| l.iter()) {
+            first[b.shard as usize + 1] += 1;
+            rows[b.shard as usize] += b.n;
+        }
+        for s in 0..shards {
+            first[s + 1] += first[s];
+        }
+        let mut blocks = vec![(std::ptr::null::<Row>(), 0u32); first[shards] as usize];
+        let mut at = first.clone();
+        for b in lists.iter().flat_map(|l| l.iter()) {
+            blocks[at[b.shard as usize] as usize] = (b.at, b.n);
+            at[b.shard as usize] += 1;
+        }
+        Dealt { blocks, first, rows }
+    }
+    pub fn count(&self, shard: usize) -> usize {
+        self.rows[shard] as usize
+    }
+    pub fn parts(&self, shard: usize) -> impl Iterator<Item = &[Row]> + Clone + '_ {
+        // SAFETY: every block holds `n` rows that were written before dealing finished.
+        self.blocks[self.first[shard] as usize..self.first[shard + 1] as usize].iter().map(|&(at, n)| unsafe { std::slice::from_raw_parts(at, n as usize) })
+    }
+}
+
+/// One thread's results of the sweep: its dealt rows and the dedup suspects it met.
+pub struct Hand {
+    pub events: Dealer,
+    pub clicks: Dealer,
+    pub suspects: Vec<Vec<Suspect>>,
+}
+
+// SAFETY: a hand is used by one thread at a time.
+unsafe impl Send for Hand {}
+
+impl Hand {
+    pub fn new(shards: usize, expected_suspects: usize) -> Hand {
+        Hand { events: Dealer::new(shards), clicks: Dealer::new(shards), suspects: (0..GROUPS).map(|_| Vec::with_capacity(expected_suspects / GROUPS + 16)).collect() }
+    }
+}
+
+/// What every sweep needs to turn a record into a dealt row.
+pub struct Deal<'a> {
+    pub seats: &'a Seating,
+    /// For every user number, the person's lead number.
+    pub lead: &'a [u32],
+    pub event_time_bits: u32,
+    pub click_time_bits: u32,
+}
+
+impl Deal<'_> {
+    /// Deals one valid event. A dealt event is
+    /// `[person-in-shard << time_bits | milliseconds after the window start, price | category << 32]`,
+    /// so ordering a shard's rows by the first word groups them by person, in time order.
+    ///
+    /// # Safety
+    /// `r.who` must be a user number.
+    #[inline(always)]
+    pub unsafe fn event(&self, r: &Ev, d: &mut Dealer) {
+        let bits = self.seats.local_bits;
+        let seat = self.seats.seat(*self.lead.get_unchecked(r.who as usize));
+        let person = (seat & ((1u32 << bits) - 1)) as u64;
+        d.put((seat >> bits) as usize, [person << self.event_time_bits | r.key >> 24, (r.key & 0xff_ffff) | (r.cat as u64) << 32]);
+    }
+}
+
+const AHEAD: usize = 16;
+
+/// Deals the valid events of a run whose event_id cannot have a copy, and lists the others.
+///
+/// # Safety
+/// The run must be live; `deal.lead` must cover every user number.
+pub unsafe fn sweep_events(run: &Run<Ev>, cells: &Cells, deal: &Deal, h: &mut Hand) {
+    for i in 0..run.n {
+        let r = &*run.first.add(i);
+        if i + AHEAD < run.n {
+            let next = &*run.first.add(i + AHEAD);
+            os::soon(cells.word_of(next.tag));
+            if next.who != NOBODY {
+                os::soon(deal.lead.as_ptr().add(next.who as usize));
+            }
+        }
+        if cells.crowded(r.tag) {
+            h.suspects.get_unchecked_mut(group_of(r.tag)).push(Suspect { rec: run.first.add(i), row: run.base.add(r.at as usize) });
+        } else if r.who != NOBODY {
+            deal.event(r, &mut h.events);
+        }
+    }
+}
+
+/// Deals the clicks of a run. A dealt click is
+/// `[person-in-shard << time_bits | milliseconds after the click window start, campaign | number << 32]`,
+/// where `number` is the click's place in the list of all click records (`first` for the run's
+/// first record).
+///
+/// # Safety
+/// As `sweep_events`.
+pub unsafe fn sweep_clicks(run: &Run<Ck>, first: u32, deal: &Deal, h: &mut Hand) {
+    let bits = deal.seats.local_bits;
+    let low = (1u32 << bits) - 1;
+    for i in 0..run.n {
+        let r = &*run.first.add(i);
+        if i + AHEAD < run.n {
+            os::soon(deal.lead.as_ptr().add((*run.first.add(i + AHEAD)).who as usize));
+        }
+        let seat = deal.seats.seat(*deal.lead.get_unchecked(r.who as usize));
+        h.clicks.put((seat >> bits) as usize, [((seat & low) as u64) << deal.click_time_bits | r.when, r.camp as u64 | ((first as u64 + i as u64) << 32)]);
+    }
+}
+
 /// Bits needed to hold any value below `span` (at least one).
 pub fn bits_for(span: i64) -> u32 {
     (64 - (span.max(2) as u64 - 1).leading_zeros()).max(1)
-}
-
-/// Deals the valid, surviving events of `runs`. A dealt event is
-/// `[person-in-shard << time_bits | milliseconds after the window start, price | category << 32]`,
-/// so ordering a shard's rows by the first word groups them by person, in time order.
-/// Returns the rows per shard.
-///
-/// # Safety
-/// `out` must have room at every `at[shard]` for the rows this thread tallied there.
-pub unsafe fn deal_events(runs: &[&Run<Ev>], seats: &Seating, time_bits: u32, d: &mut Dealer, out: *mut Row, at: &[usize]) -> Vec<u32> {
-    d.start(at);
-    let shift = seats.local_bits;
-    let low = (1u32 << shift) - 1;
-    for run in runs {
-        for i in 0..run.n {
-            let r = &*run.first.add(i);
-            if r.who != NOBODY {
-                let person = (r.who & low) as u64;
-                d.put(out, (r.who >> shift) as usize, [person << time_bits | r.key >> 24, (r.key & 0xff_ffff) | (r.cat as u64) << 32]);
-            }
-        }
-    }
-    d.finish(out, at)
-}
-
-/// Deals clicks. A dealt click is
-/// `[person-in-shard << time_bits | milliseconds after the click window start, campaign | number << 32]`,
-/// where `number` is the click's place in the list of all click records.
-///
-/// # Safety
-/// As `deal_events`.
-pub unsafe fn deal_clicks(runs: &[(&Run<Ck>, u32)], seats: &Seating, time_bits: u32, d: &mut Dealer, out: *mut Row, at: &[usize]) -> Vec<u32> {
-    d.start(at);
-    let shift = seats.local_bits;
-    let low = (1u32 << shift) - 1;
-    for (run, first) in runs {
-        for i in 0..run.n {
-            let r = &*run.first.add(i);
-            let person = (r.who & low) as u64;
-            d.put(out, (r.who >> shift) as usize, [person << time_bits | r.when, r.camp as u64 | ((*first as u64 + i as u64) << 32)]);
-        }
-    }
-    d.finish(out, at)
 }
 
 #[cfg(test)]

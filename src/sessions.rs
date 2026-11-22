@@ -7,7 +7,7 @@ use crate::os;
 use crate::parquet::{MaybeTextColumn, TextColumn};
 use crate::parse::{Ck, Run};
 use crate::people::People;
-use crate::shard::{Row, Seating};
+use crate::shard::{Dealt, Row, Seating};
 use crate::tables::{Campaigns, Products, Window};
 use crate::util::{field_at, DAY_MS, GAP_MS, WEEK_MS};
 
@@ -27,23 +27,6 @@ pub struct Out {
     pub acc: CampAcc,
 }
 
-/// Dealt rows of one kind: for each thread, where each shard's rows start and how many there are.
-pub struct Dealt<'a> {
-    pub rows: *const Row,
-    pub at: &'a [Vec<usize>],
-    pub got: &'a [Vec<u32>],
-}
-
-impl Dealt<'_> {
-    fn parts(&self, shard: usize) -> impl Iterator<Item = &[Row]> + Clone + '_ {
-        // SAFETY: `at` and `got` describe ranges that were filled inside `rows`.
-        self.at.iter().zip(self.got).map(move |(a, g)| unsafe { std::slice::from_raw_parts(self.rows.add(a[shard]), g[shard] as usize) })
-    }
-    pub fn count(&self, shard: usize) -> usize {
-        self.got.iter().map(|g| g[shard] as usize).sum()
-    }
-}
-
 /// Read-only inputs of the person stage.
 pub struct Stage<'a> {
     pub win: &'a Window,
@@ -52,8 +35,8 @@ pub struct Stage<'a> {
     pub names: &'a Names,
     pub people: &'a People,
     pub seats: &'a Seating,
-    pub events: Dealt<'a>,
-    pub clicks: Dealt<'a>,
+    pub events: &'a Dealt,
+    pub clicks: &'a Dealt,
     /// Low bits of a dealt row's first word that hold its time.
     pub event_time_bits: u32,
     pub click_time_bits: u32,

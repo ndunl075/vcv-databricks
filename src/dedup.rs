@@ -2,12 +2,12 @@
 //!
 //! A suspect is an event whose hash cell was marked by more than one row. Suspects are grouped
 //! by the event_id itself (bytes, never a hash alone); in each group the copy with the smallest
-//! ingest_ts stays and every other copy is switched off (`who = NOBODY`). An invalid copy takes
-//! part like any other, so it can be the one that stays, which drops the event.
+//! ingest_ts stays. An invalid copy takes part like any other, so it can be the one that stays,
+//! which drops the event.
 
 use crate::ids::{is_long, key_of, spread, Key};
 use crate::os;
-use crate::parse::{Ev, NOBODY};
+use crate::parse::Ev;
 use crate::stamp::{Dates, NEVER};
 
 #[derive(Clone, Copy)]
@@ -58,14 +58,15 @@ pub struct Kept {
 
 const FREE: Kept = Kept { key: [0; 3], ingest: 0, rec: std::ptr::null_mut(), row: std::ptr::null() };
 
-/// Settles one group. `table` is scratch space.
+/// Settles one group: calls `keep` once for the surviving copy of every event in it.
+/// `table` is scratch space.
 ///
 /// # Safety
-/// Every suspect must point at a live record and at the start of the row it was read from, and
-/// no other thread may touch this group's records.
-pub unsafe fn settle(lists: &[&[Suspect]], table: &mut Vec<Kept>, dates: &mut Dates) {
+/// Every suspect must point at a live record and at the start of the row it was read from.
+pub unsafe fn settle(lists: &[&[Suspect]], table: &mut Vec<Kept>, dates: &mut Dates, mut keep: impl FnMut(*mut Ev)) {
     let total: usize = lists.iter().map(|l| l.len()).sum();
     if total < 2 {
+        lists.iter().flat_map(|l| l.iter()).for_each(|s| keep(s.rec));
         return;
     }
     let cap = (total * 2).next_power_of_two();
@@ -76,7 +77,6 @@ pub unsafe fn settle(lists: &[&[Suspect]], table: &mut Vec<Kept>, dates: &mut Da
         for (i, s) in list.iter().enumerate() {
             if let Some(ahead) = list.get(i + 8) {
                 os::soon(ahead.row);
-                os::soon(ahead.rec);
             }
             let (id, id_len, ingest) = id_and_ingest(s.row, dates);
             let key = key_of(id, id_len);
@@ -89,17 +89,19 @@ pub unsafe fn settle(lists: &[&[Suspect]], table: &mut Vec<Kept>, dates: &mut Da
                 }
                 if k.key == key && (!is_long(&key) || same_id(k.row, id, id_len)) {
                     if ingest < k.ingest {
-                        (*k.rec).who = NOBODY;
                         k.ingest = ingest;
                         k.rec = s.rec;
                         k.row = s.row;
-                    } else {
-                        (*s.rec).who = NOBODY;
                     }
                     break;
                 }
                 j = (j + 1) & mask;
             }
+        }
+    }
+    for k in table.iter() {
+        if !k.rec.is_null() {
+            keep(k.rec);
         }
     }
 }
