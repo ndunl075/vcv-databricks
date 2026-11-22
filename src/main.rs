@@ -5,6 +5,7 @@
 //! (4) per person shard: sort, sessionize, attribute, aggregate, write Parquet.
 
 mod acc;
+mod buckets;
 mod csv;
 mod dedup;
 mod input;
@@ -18,6 +19,7 @@ mod ts;
 mod util;
 
 use acc::CampAcc;
+use buckets::Buckets;
 use input::{csv_files, make_tasks, map_file, Task};
 use links::{LinkRec, LinkTable};
 use parquet::{Col, StrCol};
@@ -105,14 +107,12 @@ fn run() -> Result<(), String> {
         v
     });
     let nlinks: usize = parts.iter().map(|p| p.len()).sum();
-    let links = LinkTable::build(&parts);
-    drop(parts);
-    lg!(t0, "links: {} lines, {} components slots", nlinks, links.comps.len());
+    lg!(t0, "links parsed: {} lines", nlinks);
 
     let est_events = ev_bytes / 64 + 1;
     let es_bits = (est_events / 100_000).max(1).next_power_of_two().trailing_zeros().clamp(4, 10);
     let ps_bits = (est_events / 32_000).max(1).next_power_of_two().trailing_zeros().clamp(4, 12);
-    let cx = Ctx { win, prods, camps, links, es_bits, ps_bits, threads };
+    let mut cx = Ctx { win, prods, camps, links: LinkTable::empty(), es_bits, ps_bits, threads };
     let es = 1usize << es_bits;
     let ps = 1usize << ps_bits;
 
@@ -124,51 +124,66 @@ fn run() -> Result<(), String> {
     let mut jobs: Vec<Job> = make_tasks(&ev_files, chunk).into_iter().map(|t| Job { click: false, t }).collect();
     jobs.extend(make_tasks(&ck_files, chunk).into_iter().map(|t| Job { click: true, t }));
     let next = AtomicUsize::new(0);
-    let parsed: Vec<(Vec<Vec<Ev>>, Vec<Vec<SClick>>)> = par(threads, |_| {
-        let mut eb: Vec<Vec<Ev>> = (0..es).map(|_| Vec::new()).collect();
-        let mut cb: Vec<Vec<SClick>> = (0..ps).map(|_| Vec::new()).collect();
-        loop {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            if i >= jobs.len() {
-                break;
+    // The link table is built on its own thread while the others parse; nothing in this stage needs it.
+    let (parsed, links): (Vec<(Vec<Buckets<Ev>>, Buckets<SClick>)>, LinkTable) = std::thread::scope(|sc| {
+        let lh = sc.spawn(|| LinkTable::build(&parts));
+        let parsed = par(threads, |_| {
+            let mut eb: Vec<Buckets<Ev>> = (0..es).map(|_| Buckets::new(4096)).collect();
+            let mut cb: Buckets<SClick> = Buckets::new(4096);
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= jobs.len() {
+                    break;
+                }
+                let j = &jobs[i];
+                if j.click {
+                    let d = ck_files[j.t.file];
+                    let (s, e) = j.t.range(d);
+                    parse::parse_clicks(&cx, d, s, e, &mut cb);
+                } else {
+                    let d = ev_files[j.t.file];
+                    let (s, e) = j.t.range(d);
+                    parse::parse_events(&cx, d, s, e, &mut eb);
+                }
             }
-            let j = &jobs[i];
-            if j.click {
-                let d = ck_files[j.t.file];
-                let (s, e) = j.t.range(d);
-                parse::parse_clicks(&cx, d, s, e, &mut cb);
-            } else {
-                let d = ev_files[j.t.file];
-                let (s, e) = j.t.range(d);
-                parse::parse_events(&cx, d, s, e, &mut eb);
-            }
-        }
-        (eb, cb)
+            (eb, cb)
+        });
+        (parsed, lh.join().unwrap())
     });
-    lg!(t0, "parsed");
+    drop(parts);
+    lg!(t0, "parsed; {} link components", links.comps.len());
+    cx.links = links;
+    let cx = cx;
 
     // Transpose into per-shard lists of per-worker buffers.
-    let mut e_shards: Vec<Mutex<Vec<Vec<Ev>>>> = (0..es).map(|_| Mutex::new(Vec::new())).collect();
-    let mut c_shards: Vec<Mutex<Vec<Vec<SClick>>>> = (0..ps).map(|_| Mutex::new(Vec::new())).collect();
+    let mut e_shards: Vec<Mutex<Vec<Buckets<Ev>>>> = (0..es).map(|_| Mutex::new(Vec::new())).collect();
+    let mut raw_clicks: Vec<Vec<SClick>> = Vec::new();
     for (eb, cb) in parsed {
         for (s, b) in eb.into_iter().enumerate() {
             e_shards[s].get_mut().unwrap().push(b);
         }
-        for (s, b) in cb.into_iter().enumerate() {
-            c_shards[s].get_mut().unwrap().push(b);
-        }
+        raw_clicks.extend(cb.into_blocks());
     }
 
-    // ---- Stage 3: dedup + person tagging ----
+    // ---- Stage 3: dedup + person tagging (events), person tagging (clicks) ----
     let next = AtomicUsize::new(0);
-    let tagged: Vec<Vec<Vec<SEv>>> = par(threads, |_| {
-        let mut pb: Vec<Vec<SEv>> = (0..ps).map(|_| Vec::new()).collect();
+    let nraw = raw_clicks.len();
+    let tagged: Vec<(Vec<Buckets<SEv>>, Vec<Buckets<SClick>>)> = par(threads, |_| {
+        let mut pb: Vec<Buckets<SEv>> = (0..ps).map(|_| Buckets::new(4096)).collect();
+        let mut cb: Vec<Buckets<SClick>> = (0..ps).map(|_| Buckets::new(4096)).collect();
         loop {
-            let s = next.fetch_add(1, Ordering::Relaxed);
-            if s >= es {
+            let t = next.fetch_add(1, Ordering::Relaxed);
+            if t >= es + nraw {
                 break;
             }
-            let bufs = std::mem::take(&mut *e_shards[s].lock().unwrap());
+            if t >= es {
+                for c in &raw_clicks[t - es] {
+                    let (lo, hi, _) = cx.person(c.lo, c.hi, 0);
+                    cb[cx.pshard(lo)].push(SClick { lo, hi, ..*c });
+                }
+                continue;
+            }
+            let bufs = std::mem::take(&mut *e_shards[t].lock().unwrap());
             let kept = dedup::dedup(&bufs);
             drop(bufs);
             for k in &kept {
@@ -179,13 +194,18 @@ fn run() -> Result<(), String> {
                 pb[cx.pshard(lo)].push(SEv { lo, hi, ts: k.ts, name, price: k.price, cat: k.cat });
             }
         }
-        pb
+        (pb, cb)
     });
+    drop(raw_clicks);
     lg!(t0, "deduped");
-    let mut p_shards: Vec<Mutex<Vec<Vec<SEv>>>> = (0..ps).map(|_| Mutex::new(Vec::new())).collect();
-    for pb in tagged {
+    let mut p_shards: Vec<Mutex<Vec<Buckets<SEv>>>> = (0..ps).map(|_| Mutex::new(Vec::new())).collect();
+    let mut c_shards: Vec<Mutex<Vec<Buckets<SClick>>>> = (0..ps).map(|_| Mutex::new(Vec::new())).collect();
+    for (pb, cb) in tagged {
         for (s, b) in pb.into_iter().enumerate() {
             p_shards[s].get_mut().unwrap().push(b);
+        }
+        for (s, b) in cb.into_iter().enumerate() {
+            c_shards[s].get_mut().unwrap().push(b);
         }
     }
 
@@ -232,12 +252,14 @@ fn run() -> Result<(), String> {
             let cb = std::mem::take(&mut *c_shards[s].lock().unwrap());
             evs.clear();
             cks.clear();
-            for b in eb {
-                evs.extend_from_slice(&b);
+            for b in eb.iter().flat_map(|b| b.blocks()) {
+                evs.extend_from_slice(b);
             }
-            for b in cb {
-                cks.extend_from_slice(&b);
+            for b in cb.iter().flat_map(|b| b.blocks()) {
+                cks.extend_from_slice(b);
             }
+            drop(eb);
+            drop(cb);
             if !evs.is_empty() {
                 sessions::process_shard(&cx, &mut evs, &mut cks, &mut scr, &mut out);
             }

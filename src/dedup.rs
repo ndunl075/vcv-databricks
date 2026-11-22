@@ -1,5 +1,6 @@
 //! Dedup on event_id (smallest ingest_ts wins, before validation) for one shard.
 
+use crate::buckets::Buckets;
 use crate::rec::*;
 use crate::util::field_at;
 use std::cmp::Ordering;
@@ -17,13 +18,13 @@ fn better(a: &Ev, b: &Ev) -> Ordering {
 }
 
 /// Keeps one copy per event_id. `bufs` are all records of one shard.
-pub fn dedup(bufs: &[Vec<Ev>]) -> Vec<Ev> {
+pub fn dedup(bufs: &[Buckets<Ev>]) -> Vec<Ev> {
     let total: usize = bufs.iter().map(|b| b.len()).sum();
     let cap = (total * 2).next_power_of_two().max(16);
     let mask = cap - 1;
     let mut table = vec![0u32; cap];
     let mut kept: Vec<Ev> = Vec::with_capacity(total);
-    for b in bufs {
+    for b in bufs.iter().flat_map(|b| b.blocks()) {
         for r in b {
             let mut i = (r.eh as usize) & mask;
             loop {

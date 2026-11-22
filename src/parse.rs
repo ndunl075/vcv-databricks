@@ -1,5 +1,6 @@
 //! Line parsers for events, clicks and links.
 
+use crate::buckets::Buckets;
 use crate::csv::{for_each_line, split};
 use crate::links::{IdRef, LinkRec};
 use crate::rec::*;
@@ -7,7 +8,7 @@ use crate::ts::{parse_price, parse_ts};
 use crate::util::{hash128, DAY_MS};
 
 /// Parses event lines of one chunk into per-eshard buckets.
-pub fn parse_events(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: &mut [Vec<Ev>]) {
+pub fn parse_events(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: &mut [Buckets<Ev>]) {
     for_each_line(data, s, e, |line| {
         let mut f = [(0usize, 0usize); 7];
         if !split::<7>(line, &mut f) {
@@ -79,8 +80,8 @@ pub fn parse_events(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: 
     });
 }
 
-/// Parses click lines into per-person-shard buckets (valid clicks only).
-pub fn parse_clicks(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: &mut [Vec<SClick>]) {
+/// Parses click lines (valid clicks only); the person tag comes later.
+pub fn parse_clicks(cx: &Ctx, data: &'static [u8], s: usize, e: usize, out: &mut Buckets<SClick>) {
     for_each_line(data, s, e, |line| {
         let mut f = [(0usize, 0usize); 4];
         if !split::<4>(line, &mut f) {
@@ -100,8 +101,8 @@ pub fn parse_clicks(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: 
             None => return,
         };
         let (ulo, uhi) = hash128(user);
-        let (lo, hi, _) = cx.person(ulo, uhi, 0);
-        buckets[cx.pshard(lo)].push(SClick { lo, hi, ts, cid: cid.as_ptr() as u64, camp, _pad: 0 });
+        // `lo`/`hi` hold the user's ID hash until the person is known (stage 3).
+        out.push(SClick { lo: ulo, hi: uhi, ts, cid: cid.as_ptr() as u64, camp, _pad: 0 });
     });
 }
 
