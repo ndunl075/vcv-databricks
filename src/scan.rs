@@ -175,7 +175,9 @@ unsafe fn offsets(mut m: u64, base: u32, out: *mut u32, n: &mut usize, eager: us
     let mut at = out.add(*n);
     // Writing a fixed number first keeps the common case free of data-dependent branches.
     for _ in 0..eager {
-        *at = base + m.trailing_zeros();
+        // A volatile store keeps these as plain scalar stores; packing them into one vector
+        // store costs more than it saves.
+        at.write_volatile(base + m.trailing_zeros());
         m &= m.wrapping_sub(1);
         at = at.add(1);
     }
