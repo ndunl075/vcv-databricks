@@ -1,2 +1,2 @@
 core-tagbins
-core-fuse
+core-ranges
