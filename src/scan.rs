@@ -120,6 +120,46 @@ impl Lens for Avx {
     }
 }
 
+/// AVX-512BW on full 64-byte registers: one load and three compares give the masks directly.
+#[cfg(target_arch = "x86_64")]
+pub struct Avx512;
+
+#[cfg(target_arch = "x86_64")]
+impl Lens for Avx512 {
+    #[inline(always)]
+    unsafe fn marks(p: *const u8) -> Marks {
+        use std::arch::x86_64::*;
+        let v = _mm512_loadu_si512(p as *const _);
+        Marks {
+            comma: _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b',' as i8)),
+            line: _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'\n' as i8)),
+            quote: _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8(b'"' as i8)),
+        }
+    }
+}
+
+/// AVX-512BW/VL compares on 32-byte registers: masks without movemask, and no 512-bit work
+/// (which lowers the clock on some Xeons).
+#[cfg(target_arch = "x86_64")]
+pub struct Avx512Half;
+
+#[cfg(target_arch = "x86_64")]
+impl Lens for Avx512Half {
+    #[inline(always)]
+    unsafe fn marks(p: *const u8) -> Marks {
+        use std::arch::x86_64::*;
+        let lo = _mm256_loadu_si256(p as *const __m256i);
+        let hi = _mm256_loadu_si256(p.add(32) as *const __m256i);
+        macro_rules! gather {
+            ($c:expr) => {{
+                let want = _mm256_set1_epi8($c as i8);
+                (_mm256_cmpeq_epi8_mask(lo, want) as u64) | ((_mm256_cmpeq_epi8_mask(hi, want) as u64) << 32)
+            }};
+        }
+        Marks { comma: gather!(b','), line: gather!(b'\n'), quote: gather!(b'"') }
+    }
+}
+
 /// The lens every build can use without checking the CPU.
 #[cfg(target_arch = "aarch64")]
 pub type Plain = Neon;

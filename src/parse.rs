@@ -577,6 +577,30 @@ unsafe fn read_fast(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &
     read_with::<crate::scan::Avx, crate::scan::Bmi2>(sh, r, pairs, p, true)
 }
 
+/// The AVX-512 build of `read_fast`; LENS picks the 64-byte or the 32-byte form.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,avx2,bmi1,bmi2,popcnt")]
+unsafe fn read_fast512(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece) {
+    if LENS_FULL {
+        read_with::<crate::scan::Avx512, crate::scan::Bmi2>(sh, r, pairs, p, true)
+    } else {
+        read_with::<crate::scan::Avx512Half, crate::scan::Bmi2>(sh, r, pairs, p, true)
+    }
+}
+
+/// Which AVX-512 lens `read_fast512` uses.
+const LENS_FULL: bool = true;
+
+/// True when this CPU has AVX-512 BW and VL as well as the fast reader's other features.
+pub fn avx512_cpu() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        fast_cpu() && is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") && is_x86_feature_detected!("avx512vl")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
 /// True when this CPU can run the fast build of the reader (AVX2, BMI1, BMI2, POPCNT).
 pub fn fast_cpu() -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -594,6 +618,9 @@ pub fn read(sh: &Shared, r: &mut Reader, pairs: &mut Vec<[u32; 2]>, p: &Piece, f
     unsafe {
         #[cfg(target_arch = "x86_64")]
         if fast {
+            if avx512_cpu() {
+                return read_fast512(sh, r, pairs, p);
+            }
             return read_fast(sh, r, pairs, p);
         }
         let _ = fast;
