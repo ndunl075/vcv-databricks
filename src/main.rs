@@ -93,12 +93,25 @@ fn env_path(name: &str, default: &str) -> PathBuf {
     PathBuf::from(std::env::var(name).unwrap_or_else(|_| default.to_string()))
 }
 
+/// Stage marks: a line per stage on stderr, and one short line with all of them at the end
+/// (wall seconds / user CPU / kernel CPU / thousands of page faults, all since the start).
+struct Marks {
+    t0: Instant,
+    short: String,
+}
+
+impl Marks {
+    fn mark(&mut self, tag: &str, text: String) {
+        let u = os::used();
+        let wall = self.t0.elapsed().as_secs_f64();
+        eprintln!("[{wall:7.3}s cpu {:6.3}+{:5.3}] {text}", u.user, u.kernel);
+        self.short.push_str(&format!(" {tag}={wall:.2}/{:.2}/{:.2}/{}", u.user, u.kernel, (u.soft_faults + u.hard_faults) / 1000));
+    }
+}
+
 macro_rules! lg {
-    ($t0:expr, $($arg:tt)*) => {
-{
-            let (user, kernel) = os::cpu_seconds();
-            eprintln!("[{:7.3}s cpu {:6.3}+{:5.3}] {}", $t0.elapsed().as_secs_f64(), user, kernel, format!($($arg)*))
-        }
+    ($m:expr, $tag:expr, $($arg:tt)*) => {
+        $m.mark($tag, format!($($arg)*))
     };
 }
 
@@ -117,7 +130,7 @@ fn wide_reader() -> bool {
 }
 
 fn run() -> Result<(), String> {
-    let t0 = Instant::now();
+    let mut t0 = Marks { t0: Instant::now(), short: String::new() };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (data_dir, out_dir) = if args.len() >= 2 {
         (PathBuf::from(&args[0]), PathBuf::from(&args[1]))
@@ -154,7 +167,7 @@ fn run() -> Result<(), String> {
     let ck_bytes: usize = ck_files.iter().map(|f| f.len()).sum();
     let lk_bytes: usize = lk_files.iter().map(|f| f.len()).sum();
     let all_bytes = ev_bytes + ck_bytes + lk_bytes;
-    lg!(t0, "mapped {} event, {} click, {} link files ({} MB), {} threads", ev_files.len(), ck_files.len(), lk_files.len(), all_bytes >> 20, threads);
+    lg!(t0, "map", "mapped {} event, {} click, {} link files ({} MB), {} threads", ev_files.len(), ck_files.len(), lk_files.len(), all_bytes >> 20, threads);
 
     // ---- 1. Read ----
     let names = Names::new(all_bytes / 1024, threads);
@@ -216,7 +229,7 @@ fn run() -> Result<(), String> {
         return Err("more than four billion clicks".to_string());
     }
     let ev_total: usize = ev_runs.iter().map(|r| r.n).sum();
-    lg!(t0, "read: {} event rows, {} clicks, {} user ids", ev_total, ck_total, ids);
+    lg!(t0, "read", "read: {} event rows, {} clicks, {} user ids", ev_total, ck_total, ids);
 
     // ---- 2. Tally ----
     let seats = Seating::new(ids, ev_total);
@@ -242,7 +255,7 @@ fn run() -> Result<(), String> {
     });
     let tallies = tallies.into_vec();
     let suspects: usize = tallies.iter().flat_map(|t| t.suspects.iter()).map(|v| v.len()).sum();
-    lg!(t0, "tallied: {} shards, {} dedup suspects", shards, suspects);
+    lg!(t0, "tally", "tallied: {} shards, {} dedup suspects", shards, suspects);
 
     // ---- 3. Dedup ----
     let next = AtomicUsize::new(0);
@@ -259,7 +272,7 @@ fn run() -> Result<(), String> {
             unsafe { dedup::settle(&lists, &mut table, &mut dates) };
         }
     });
-    lg!(t0, "deduped");
+    lg!(t0, "dedup", "deduped");
 
     // ---- 4. Deal ----
     let ev_layout = Layout::new(&tallies.iter().map(|t| &t.events[..]).collect::<Vec<_>>(), shards);
@@ -278,7 +291,7 @@ fn run() -> Result<(), String> {
         (e, c)
     });
     let (ev_got, ck_got): (Vec<Vec<u32>>, Vec<Vec<u32>>) = got.into_iter().unzip();
-    lg!(t0, "dealt");
+    lg!(t0, "deal", "dealt");
 
     // ---- 5. People ----
     let stage = Stage {
@@ -337,7 +350,7 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(out.acc)
     });
-    lg!(t0, "people done, user_daily written");
+    lg!(t0, "people", "people done, user_daily written");
 
     let mut total = CampAcc::new(ncamp, day0, ndays);
     for r in results {
@@ -365,7 +378,8 @@ fn run() -> Result<(), String> {
         &[ColumnView::Text(&cid), ColumnView::Text(&chan), ColumnView::Date(&day), ColumnView::Int64(&c_s), ColumnView::Int64(&c_p), ColumnView::Int64(&c_r), ColumnView::Int64(&c_a)],
     )
     .map_err(io)?;
-    lg!(t0, "done");
+    lg!(t0, "end", "done");
+    eprintln!("stages{}", t0.short);
     Ok(())
 }
 

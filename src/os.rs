@@ -92,15 +92,24 @@ pub fn release(start: *const u8, bytes: usize) {
     }
 }
 
-/// Processor seconds this process has used so far: (in user code, in the kernel).
-pub fn cpu_seconds() -> (f64, f64) {
+/// What the process has used so far.
+pub struct Used {
+    /// Processor seconds in user code and in the kernel.
+    pub user: f64,
+    pub kernel: f64,
+    /// Page faults served without and with reading from disk.
+    pub soft_faults: i64,
+    pub hard_faults: i64,
+}
+
+pub fn used() -> Used {
     let mut raw = [0i64; 18];
     // SAFETY: the buffer is as large as the system's record (two time values and 14 counters).
     unsafe {
         sys::usage(0, &mut raw);
     }
     let secs = |s: i64, micros: i64| s as f64 + (micros as i32) as f64 / 1e6;
-    (secs(raw[0], raw[1]), secs(raw[2], raw[3]))
+    Used { user: secs(raw[0], raw[1]), kernel: secs(raw[2], raw[3]), soft_faults: raw[8], hard_faults: raw[9] }
 }
 
 /// Ends the process at once: no destructors, no unwinding, no flushing.
