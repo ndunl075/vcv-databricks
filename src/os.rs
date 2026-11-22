@@ -14,6 +14,9 @@ mod sys {
         pub fn advise(start: *mut c_void, bytes: usize, what: i32) -> i32;
         #[link_name = "_exit"]
         pub fn leave(code: i32) -> !;
+        #[cfg(target_os = "linux")]
+        #[link_name = "sync_file_range"]
+        pub fn start_flush(fd: i32, at: i64, bytes: i64, flags: u32) -> i32;
         #[link_name = "getrusage"]
         pub fn usage(who: i32, out: *mut [i64; 18]) -> i32;
     }
@@ -86,6 +89,19 @@ pub fn file_bytes(file: &File, bytes: usize) -> &'static [u8] {
         }
         std::slice::from_raw_parts(base as *const u8, bytes)
     }
+}
+
+/// Asks the system to start writing a file's dirty pages to disk now, without waiting for it.
+/// Output written early is then on its way to disk while the rest of the run goes on, instead of
+/// all of it being flushed when the run ends.
+pub fn start_writeback(file: &File) {
+    #[cfg(target_os = "linux")]
+    // SAFETY: advice only, on an open file; SYNC_FILE_RANGE_WRITE = 2, whole file.
+    unsafe {
+        sys::start_flush(file.as_raw_fd(), 0, 0, 2);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = file;
 }
 
 /// Gives the pages of a region back (contents are lost or reloaded on the next touch).

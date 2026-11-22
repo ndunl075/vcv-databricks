@@ -36,6 +36,21 @@ impl UserCols {
     }
 }
 
+impl UserCols {
+    pub fn rows(&self) -> usize {
+        self.day.len()
+    }
+    /// Empties every column, keeping the memory.
+    pub fn clear(&mut self) {
+        self.user.clear();
+        self.day.clear();
+        self.sessions.clear();
+        self.events.clear();
+        self.revenue.clear();
+        self.top.clear();
+    }
+}
+
 pub struct Out {
     pub users: UserCols,
     pub acc: CampAcc,

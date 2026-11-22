@@ -26,6 +26,12 @@ impl TextColumn {
     pub fn with_room(rows: usize, bytes_each: usize) -> TextColumn {
         TextColumn { bytes: Vec::with_capacity(rows * bytes_each), page_starts: Vec::new(), rows: 0 }
     }
+    /// Empties the column, keeping its memory.
+    pub fn clear(&mut self) {
+        self.bytes.clear();
+        self.page_starts.clear();
+        self.rows = 0;
+    }
     #[inline]
     pub fn push(&mut self, v: &[u8]) {
         if self.rows % ROWS_PER_PAGE == 0 {
@@ -49,6 +55,12 @@ impl MaybeTextColumn {
     /// Room for `rows` rows whose values take about `bytes_each` bytes on average.
     pub fn with_room(rows: usize, bytes_each: usize) -> MaybeTextColumn {
         MaybeTextColumn { bytes: Vec::with_capacity(rows * bytes_each), page_starts: Vec::new(), present: Vec::with_capacity(rows) }
+    }
+    /// Empties the column, keeping its memory.
+    pub fn clear(&mut self) {
+        self.bytes.clear();
+        self.page_starts.clear();
+        self.present.clear();
     }
     #[inline]
     pub fn push(&mut self, v: Option<&[u8]>) {
@@ -641,6 +653,7 @@ pub fn write_table(path: &Path, names: &[&str], columns: &[ColumnView]) -> std::
         }
         IoSlice::advance_slices(&mut rest, n);
     }
+    crate::os::start_writeback(&file);
     Ok(())
 }
 
