@@ -118,6 +118,47 @@ impl Cells {
 /// Tags are filed into this many ranges of cells; each range is marked by one thread.
 pub const RANGES: usize = 256;
 
+/// One reader's event tags, filed by cell range: a fixed bin per range in one region of memory,
+/// and a list for whatever does not fit.
+pub struct TagBins {
+    room: usize,
+    bins: *mut u32,
+    lens: Vec<usize>,
+    spill: Vec<Vec<u32>>,
+}
+
+// SAFETY: the region is owned by this value alone, and shared only for reading.
+unsafe impl Send for TagBins {}
+unsafe impl Sync for TagBins {}
+
+impl TagBins {
+    /// Bins for about `rows` events.
+    pub fn new(rows: usize) -> TagBins {
+        let room = (rows / RANGES + rows / RANGES / 8 + 16).next_multiple_of(16);
+        TagBins { room, bins: os::zeroed_array::<u32>(room * RANGES), lens: vec![0; RANGES], spill: (0..RANGES).map(|_| Vec::new()).collect() }
+    }
+    #[inline(always)]
+    pub fn push(&mut self, tag: u32) {
+        let r = range_of(tag);
+        // SAFETY: `r` is below RANGES; the bin index is checked against its room.
+        unsafe {
+            let n = self.lens.get_unchecked_mut(r);
+            if *n < self.room {
+                *self.bins.add(r * self.room + *n) = tag;
+                *n += 1;
+            } else {
+                self.spill.get_unchecked_mut(r).push(tag);
+            }
+        }
+    }
+    /// The tags of range `r`, in up to two slices.
+    pub fn range(&self, r: usize) -> [&[u32]; 2] {
+        // SAFETY: the first `lens[r]` items of bin `r` were written.
+        let bin = unsafe { std::slice::from_raw_parts(self.bins.add(r * self.room), self.lens[r]) };
+        [bin, &self.spill[r][..]]
+    }
+}
+
 /// The range of cells `tag` belongs to. Ranges never share a word: the cell count is at least
 /// 2^16, so a word (32 cells) never spans a change in the tag's top 8 bits.
 #[inline(always)]
@@ -153,11 +194,12 @@ pub struct Reader {
     ck_left: usize,
     pub ck_runs: Vec<Run<Ck>>,
     /// Event hash tags, filed by cell range (`range_of`).
-    pub tags: Vec<Vec<u32>>,
+    pub tags: TagBins,
 }
 
 impl Reader {
-    pub fn new() -> Reader {
+    /// A reader that expects to see about `events` event rows.
+    pub fn new(events: usize) -> Reader {
         Reader {
             ix: Index::new(),
             wx: Wide::new(),
@@ -169,7 +211,7 @@ impl Reader {
             ck_free: std::ptr::null_mut(),
             ck_left: 0,
             ck_runs: Vec::new(),
-            tags: (0..RANGES).map(|_| Vec::new()).collect(),
+            tags: TagBins::new(events),
         }
     }
 }
@@ -268,7 +310,7 @@ struct EventRows<'a, 'b> {
     dates: &'b mut Dates,
     supply: &'b mut Supply,
     runs: &'b mut Vec<Run<Ev>>,
-    tags: &'b mut [Vec<u32>],
+    tags: &'b mut TagBins,
     free: *mut Ev,
     left: usize,
     run_first: *mut Ev,
@@ -346,7 +388,7 @@ impl Rows<6> for EventRows<'_, '_> {
         self.left -= 1;
         let key = if ok { (((ts - sh.win.ws) as u64) << 24) | price as u64 } else { 0 };
         rec.write(Ev { key, who: NOBODY, cat, tag, at: at as u32 });
-        self.tags.get_unchecked_mut(range_of(tag)).push(tag);
+        self.tags.push(tag);
         let into = if ok { std::ptr::addr_of_mut!((*rec).who) } else { std::ptr::null_mut() };
         if SKIP & 8 != 0 {
             return;

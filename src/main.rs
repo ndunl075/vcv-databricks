@@ -188,7 +188,7 @@ fn run() -> Result<(), String> {
         while to > from && data[to - 1] != b'\n' {
             to -= 1;
         }
-        let mut reader = Reader::new();
+        let mut reader = Reader::new(data.len() / 64);
         let (fast, scanner) = reader_choice();
         let ms = |f: &mut dyn FnMut() -> usize| {
             let t = Instant::now();
@@ -218,7 +218,8 @@ fn run() -> Result<(), String> {
     let link_pieces = pieces.iter().filter(|p| p.kind == Kind::Links).count();
     let links_left = AtomicUsize::new(link_pieces);
     let (fast, scanner) = reader_choice();
-    let readers: Each<Reader> = Each::new(threads, Reader::new);
+    // Event rows run about 80 bytes; readers take pieces as they go, so allow for an uneven share.
+    let readers: Each<Reader> = Each::new(threads, || Reader::new(ev_bytes / 64 / threads));
     let pair_lists: Each<Vec<[u32; 2]>> = Each::new(threads, Vec::new);
     let joined: Mutex<Option<People>> = Mutex::new(if link_pieces == 0 { Some(People::join(&names, &[])) } else { None });
     let next = AtomicUsize::new(0);
@@ -249,7 +250,7 @@ fn run() -> Result<(), String> {
     let mut ev_runs: Vec<Run<Ev>> = Vec::new();
     let mut ck_runs: Vec<(Run<Ck>, u32)> = Vec::new();
     let mut ck_total = 0u64;
-    let mut tag_lists: Vec<Vec<Vec<u32>>> = Vec::with_capacity(threads);
+    let mut tag_lists: Vec<parse::TagBins> = Vec::with_capacity(threads);
     for r in readers.into_vec() {
         tag_lists.push(r.tags);
         ev_runs.extend(r.ev_runs);
@@ -276,7 +277,7 @@ fn run() -> Result<(), String> {
         if k >= parse::RANGES {
             break;
         }
-        let lists: Vec<&[u32]> = tag_lists.iter().map(|t| &t[k][..]).collect();
+        let lists: Vec<&[u32]> = tag_lists.iter().flat_map(|t| t.range(k)).collect();
         sh.cells.mark_range(&lists);
     });
     // Kept until the process ends: giving it back costs more than it saves.
