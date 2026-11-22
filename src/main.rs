@@ -249,7 +249,9 @@ fn run() -> Result<(), String> {
     let mut ev_runs: Vec<Run<Ev>> = Vec::new();
     let mut ck_runs: Vec<(Run<Ck>, u32)> = Vec::new();
     let mut ck_total = 0u64;
+    let mut tag_lists: Vec<Vec<Vec<u32>>> = Vec::with_capacity(threads);
     for r in readers.into_vec() {
+        tag_lists.push(r.tags);
         ev_runs.extend(r.ev_runs);
         for run in r.ck_runs {
             let n = run.n as u64;
@@ -266,6 +268,20 @@ fn run() -> Result<(), String> {
         eprintln!("stages{}", t0.short);
         return Ok(());
     }
+
+    // Mark the event cells, one range of cells per worker at a time.
+    let next = AtomicUsize::new(0);
+    par(threads, |_| loop {
+        let k = next.fetch_add(1, Ordering::Relaxed);
+        if k >= parse::RANGES {
+            break;
+        }
+        let lists: Vec<&[u32]> = tag_lists.iter().map(|t| &t[k][..]).collect();
+        sh.cells.mark_range(&lists);
+    });
+    // Kept until the process ends: giving it back costs more than it saves.
+    std::mem::forget(tag_lists);
+    lg!(t0, "mark", "marked event cells");
 
     // ---- 2. Sweep: deal the rows that need no dedup, list the suspects ----
     let seats = Seating::new(ids, ev_total);

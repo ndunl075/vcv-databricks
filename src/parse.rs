@@ -3,11 +3,12 @@
 //! Events: every row with an event_id becomes an `Ev`, valid or not, because an invalid copy can
 //! still be the one dedup keeps. Each event_id also marks a 2-bit cell chosen by its hash:
 //! "seen" and "seen more than once". Only events whose cell says "more than once" need the exact
-//! dedup later.
+//! dedup later. The marks are made after reading, not during it: each reader files its events'
+//! hash tags by cell range, then each range is marked by one thread alone, with plain writes to
+//! memory that stays in cache, instead of a locked instruction on a far cache line per row.
 //! Clicks: only valid clicks become a `Ck`. Links: both IDs' numbers.
 //!
-//! User IDs become numbers through `Names`. Those lookups, and the cell updates, touch memory
-//! far apart, so each row's lookups are started (address computed, cache line requested) and
+//! User IDs become numbers through `Names`. Those lookups touch memory far apart, so each row's lookups are started (address computed, cache line requested) and
 //! finished a few rows later, when the memory has arrived.
 
 use crate::ids::{hash_of, word, Key, Names, Supply, Table, LOW_BYTES};
@@ -93,17 +94,35 @@ impl Cells {
         let w = unsafe { (*self.word_of(tag)).load(Relaxed) };
         (w >> ((cell & 31) * 2)) & 2 != 0
     }
-    #[inline(always)]
-    fn mark(&self, tag: u32) {
-        let cell = tag >> self.shift;
-        let sh = (cell & 31) * 2;
-        // SAFETY: see `word_of`.
-        let w = unsafe { &*self.word_of(tag) };
-        let before = w.fetch_or(1 << sh, Relaxed);
-        if (before >> sh) & 3 == 1 {
-            w.fetch_or(2 << sh, Relaxed);
+    /// Marks the cells of every tag in `lists`. All the tags must be in one range (see
+    /// `range_of`), and no other thread may mark that range at the same time: the words are
+    /// changed with plain reads and writes.
+    pub fn mark_range(&self, lists: &[&[u32]]) {
+        const AHEAD: usize = 16;
+        for tags in lists {
+            for (i, &tag) in tags.iter().enumerate() {
+                if let Some(&next) = tags.get(i + AHEAD) {
+                    os::soon(self.word_of(next));
+                }
+                let sh = ((tag >> self.shift) & 31) * 2;
+                // SAFETY: see `word_of`; this thread alone touches the range.
+                let w = unsafe { &*self.word_of(tag) };
+                let now = w.load(Relaxed);
+                let bit = if (now >> sh) & 1 != 0 { 2u64 } else { 1 };
+                w.store(now | (bit << sh), Relaxed);
+            }
         }
     }
+}
+
+/// Tags are filed into this many ranges of cells; each range is marked by one thread.
+pub const RANGES: usize = 256;
+
+/// The range of cells `tag` belongs to. Ranges never share a word: the cell count is at least
+/// 2^16, so a word (32 cells) never spans a change in the tag's top 8 bits.
+#[inline(always)]
+pub fn range_of(tag: u32) -> usize {
+    (tag >> 24) as usize
 }
 
 /// Everything the row readers share.
@@ -133,6 +152,8 @@ pub struct Reader {
     ck_free: *mut Ck,
     ck_left: usize,
     pub ck_runs: Vec<Run<Ck>>,
+    /// Event hash tags, filed by cell range (`range_of`).
+    pub tags: Vec<Vec<u32>>,
 }
 
 impl Reader {
@@ -148,6 +169,7 @@ impl Reader {
             ck_free: std::ptr::null_mut(),
             ck_left: 0,
             ck_runs: Vec::new(),
+            tags: (0..RANGES).map(|_| Vec::new()).collect(),
         }
     }
 }
@@ -161,9 +183,6 @@ struct Pending {
     hash: u64,
     at: *const u8,
     len: usize,
-    /// Event tag whose cell to mark, when `marks` is set.
-    tag: u32,
-    marks: bool,
 }
 
 const LAG: usize = 8;
@@ -181,15 +200,12 @@ impl<'a> Flight<'a> {
     fn new(sh: &'a Shared<'a>) -> Flight<'a> {
         let guard = sh.names.gate.read().unwrap();
         let table = sh.names.table();
-        let idle = Pending { into: std::ptr::null_mut(), key: [0; 3], hash: 0, at: std::ptr::null(), len: 0, tag: 0, marks: false };
+        let idle = Pending { into: std::ptr::null_mut(), key: [0; 3], hash: 0, at: std::ptr::null(), len: 0 };
         Flight { sh, table, guard: Some(guard), ring: [idle; LAG], pushed: 0 }
     }
 
     #[inline(always)]
     unsafe fn finish(&self, supply: &mut Supply, p: &Pending) {
-        if p.marks {
-            self.sh.cells.mark(p.tag);
-        }
         if !p.into.is_null() {
             *p.into = self.table.finish(self.sh.names, supply, &p.key, p.hash, p.at, p.len);
         }
@@ -252,6 +268,7 @@ struct EventRows<'a, 'b> {
     dates: &'b mut Dates,
     supply: &'b mut Supply,
     runs: &'b mut Vec<Run<Ev>>,
+    tags: &'b mut [Vec<u32>],
     free: *mut Ev,
     left: usize,
     run_first: *mut Ev,
@@ -295,7 +312,6 @@ impl Rows<6> for EventRows<'_, '_> {
         }
         let sh = self.fl.sh;
         let tag = (hash_of(d.add(a0), e0 - a0) >> 32) as u32;
-        os::soon(sh.cells.word_of(tag));
         let user_len = e1 - a1;
         let (user_key, user_hash) = self.fl.table.begin(d.add(a1), user_len);
 
@@ -330,11 +346,12 @@ impl Rows<6> for EventRows<'_, '_> {
         self.left -= 1;
         let key = if ok { (((ts - sh.win.ws) as u64) << 24) | price as u64 } else { 0 };
         rec.write(Ev { key, who: NOBODY, cat, tag, at: at as u32 });
+        self.tags.get_unchecked_mut(range_of(tag)).push(tag);
         let into = if ok { std::ptr::addr_of_mut!((*rec).who) } else { std::ptr::null_mut() };
         if SKIP & 8 != 0 {
             return;
         }
-        self.fl.push(self.supply, Pending { into, key: user_key, hash: user_hash, at: d.add(a1), len: user_len, tag, marks: true });
+        self.fl.push(self.supply, Pending { into, key: user_key, hash: user_hash, at: d.add(a1), len: user_len });
     }
 }
 
@@ -395,7 +412,7 @@ impl Rows<3> for ClickRows<'_, '_> {
         self.free = rec.add(1);
         self.left -= 1;
         rec.write(Ck { when: (ts - sh.win.cws) as u64, who: NOBODY, camp, id_at: d.add(a0) });
-        self.fl.push(self.supply, Pending { into: std::ptr::addr_of_mut!((*rec).who), key: user_key, hash: user_hash, at: d.add(a1), len: user_len, tag: 0, marks: false });
+        self.fl.push(self.supply, Pending { into: std::ptr::addr_of_mut!((*rec).who), key: user_key, hash: user_hash, at: d.add(a1), len: user_len });
     }
 }
 
@@ -429,7 +446,7 @@ impl Rows<1> for LinkRows<'_, '_> {
         self.pairs.set_len(n + 1);
         for (k, (a, e)) in [(a0, e0), (a1, e1)].into_iter().enumerate() {
             let (key, hash) = self.fl.table.begin(d.add(a), e - a);
-            self.fl.push(self.supply, Pending { into: slot.add(k), key, hash, at: d.add(a), len: e - a, tag: 0, marks: false });
+            self.fl.push(self.supply, Pending { into: slot.add(k), key, hash, at: d.add(a), len: e - a });
         }
     }
 }
@@ -482,6 +499,7 @@ unsafe fn read_with<L: Lens, Q: Squeeze>(sh: &Shared, r: &mut Reader, pairs: &mu
                 dates: &mut r.dates,
                 supply: &mut r.supply,
                 runs: &mut r.ev_runs,
+                tags: &mut r.tags,
                 free: r.ev_free,
                 left: r.ev_left,
                 run_first: r.ev_free,
