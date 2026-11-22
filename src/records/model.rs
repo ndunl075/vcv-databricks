@@ -7,6 +7,7 @@ struct Sess {
     start: u64,
     day: u32,
     rev: u64,
+}
 
 #[derive(Clone, Copy)]
 pub struct St {
@@ -20,14 +21,17 @@ pub struct St {
     catmask: u32,
     mark: usize,
     pidx: u32,
+}
 
 pub enum Name<'a> {
     Simple(u32, u32),
     Bytes(&'a [u8]),
+}
 
 pub struct Tab<T> {
     p: *mut T,
     n: usize,
+}
 unsafe impl<T> Send for Tab<T> {}
 impl<T: Copy> Tab<T> {
     #[cfg_attr(feature = "tl", track_caller)]
@@ -45,6 +49,7 @@ impl<T: Copy> Tab<T> {
     pub unsafe fn set_ptr(&mut self, p: *mut T) {
         self.p = p;
     }
+}
 impl<T> std::ops::Index<usize> for Tab<T> {
     type Output = T;
     #[inline(always)]
@@ -52,12 +57,14 @@ impl<T> std::ops::Index<usize> for Tab<T> {
         assert!(i < self.n);
         unsafe { &*self.p.add(i) }
     }
+}
 impl<T> std::ops::IndexMut<usize> for Tab<T> {
     #[inline(always)]
     fn index_mut(&mut self, i: usize) -> &mut T {
         assert!(i < self.n);
         unsafe { &mut *self.p.add(i) }
     }
+}
 
 pub struct Col<T> {
     p: *mut T,
@@ -66,10 +73,12 @@ pub struct Col<T> {
     home: *mut T,
     home_cap: usize,
     zlen: usize,
+}
 unsafe impl<T> Send for Col<T> {}
 pub static COLS_PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 extern "C" {
     fn syscall(n: i64, ...) -> i64;
+}
 impl<T: Copy> Col<T> {
     #[cfg_attr(feature = "tl", track_caller)]
     pub fn new(cap: usize) -> Col<T> {
@@ -168,6 +177,7 @@ impl<T: Copy> Col<T> {
         self.p = self.home;
         self.cap = self.home_cap;
     }
+}
 
 pub struct Core {
     ws_mod: u64,
@@ -193,10 +203,12 @@ pub struct Core {
     cts: Vec<u64>,
     iv: Vec<[u64; 2]>,
     dstart: Vec<u32>,
+}
 
 #[inline]
 pub fn simple_name(g: &G, u: u32, class: u32) -> (u64, usize) {
     simple_name_key(g.ukey, u, class)
+}
 
 #[inline]
 pub fn simple_name_key(ukey: u64, u: u32, class: u32) -> (u64, usize) {
@@ -211,6 +223,7 @@ pub fn simple_name_key(ukey: u64, u: u32, class: u32) -> (u64, usize) {
         }
     }
     best
+}
 
 impl Core {
     pub fn new(nc: usize, nd: usize, row_cap: usize, ws_mod: u64, day0: i32) -> Core {
@@ -596,3 +609,4 @@ impl Core {
             k = e;
         }
     }
+}

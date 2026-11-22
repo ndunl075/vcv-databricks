@@ -25,6 +25,7 @@ macro_rules! kernel {
             }
         }
     };
+}
 kernel!(Free, "free", PIPE);
 kernel!(FreeN, "freen", CHAIN);
 
@@ -39,6 +40,7 @@ pub const REASON_NAMES: [&str; 16] = [
 fn count(_r: usize) {
     #[cfg(feature = "stats")]
     REASONS[_r].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
 
 
 #[repr(C, align(64))]
@@ -48,6 +50,7 @@ struct IdShape {
     subv: [u8; 16],
     lz: [u8; 16],
     orv: [u64; 2],
+}
 
 const fn id_shapes(prefix: u8, dig: usize, chk: usize, allow_empty: bool) -> [IdShape; 128] {
     let mut t = [IdShape { ctrl: [0x80; 16], subv: [0; 16], lz: [0; 16], orv: [0; 2] }; 128];
@@ -92,6 +95,7 @@ const fn id_shapes(prefix: u8, dig: usize, chk: usize, allow_empty: bool) -> [Id
         raw += 1;
     }
     t
+}
 
 const fn id_shapes_raw(prefix: u8, dig: usize, chk: usize, allow_empty: bool) -> [IdShape; 64] {
     let both = id_shapes(prefix, dig, chk, allow_empty);
@@ -107,6 +111,7 @@ const fn id_shapes_raw(prefix: u8, dig: usize, chk: usize, allow_empty: bool) ->
         raw += 1;
     }
     t
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -115,6 +120,7 @@ struct JidRow {
     subv: [u8; 32],
     lz: [u8; 32],
     orv: [u64; 4],
+}
 const JID_ROWS: usize = 64 * 64;
 
 const fn jid_rows() -> [JidRow; JID_ROWS] {
@@ -146,6 +152,7 @@ const fn jid_rows() -> [JidRow; JID_ROWS] {
         c0 += 1;
     }
     t
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -154,6 +161,7 @@ struct DecShape {
     subv: [u8; 16],
     lz: [u8; 16],
     _pad: [u8; 16],
+}
 
 const fn dec_shapes(prefix: &[u8]) -> [DecShape; 128] {
     let mut t = [DecShape { ctrl: [0x80; 16], subv: [0; 16], lz: [0; 16], _pad: [0; 16] }; 128];
@@ -193,6 +201,7 @@ const fn dec_shapes(prefix: &[u8]) -> [DecShape; 128] {
         raw += 1;
     }
     t
+}
 
 const fn camp4_shapes() -> [DecShape; 128] {
     let mut t = [DecShape { ctrl: [0x80; 16], subv: [0; 16], lz: [0; 16], _pad: [0; 16] }; 128];
@@ -235,6 +244,7 @@ const fn camp4_shapes() -> [DecShape; 128] {
         raw += 1;
     }
     t
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -243,6 +253,7 @@ struct TsA {
     base: [u8; 16],
     lim: [u8; 16],
     w1: [i8; 16],
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TsB {
@@ -250,6 +261,7 @@ struct TsB {
     w3: [i16; 8],
     kmaskv: [u8; 16],
     limv: [i32; 4],
+}
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct TsC {
@@ -258,6 +270,7 @@ struct TsC {
     dmask: i16,
     me: i32,
     mf: [i32; 2],
+}
 
 const IDENT: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 const TSA_INVALID: TsA = TsA { ctrl: IDENT, base: [0; 16], lim: [255; 16], w1: [0; 16] };
@@ -318,6 +331,7 @@ const fn ts_f12(f2: bool, q: bool) -> (TsA, TsB, TsC) {
     c.dmask = -1;
     c.me = 1000;
     (a, b, c)
+}
 
 const fn ts_rows() -> ([TsA; 64], [TsB; 64], [TsC; 64]) {
     let mut ta = [TSA_INVALID; 64];
@@ -376,33 +390,39 @@ const fn ts_rows() -> ([TsA; 64], [TsB; 64], [TsC; 64]) {
         k += 1;
     }
     (ta, tb, tc)
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct TjA {
     ctrl: [u8; 32],
     base: [u8; 32],
+}
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct TjB {
     lim: [u8; 32],
     w1: [i8; 32],
+}
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct TjC {
     w2: [i16; 16],
     w3: [i16; 16],
+}
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct TjD {
     limv: [i32; 8],
     kmask2: [u8; 16],
     kmask3: [u8; 16],
+}
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct TjE {
     kme: [i64; 4],
     kmf: [i64; 4],
+}
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
 struct TjF {
@@ -411,6 +431,7 @@ struct TjF {
     pmask: u64,
     pmask3: u64,
     koffe: i64,
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -422,6 +443,7 @@ struct TjRow {
     e: TjE,
     f: TjF,
     _pad: [u64; 16],
+}
 const _: () = assert!(core::mem::size_of::<TjRow>() == 512);
 
 const fn tj_table() -> [TjRow; 128] {
@@ -433,6 +455,7 @@ const fn tj_table() -> [TjRow; 128] {
         j += 1;
     }
     t
+}
 
 const fn tjl_table() -> [TjRow; 130] {
     let (ja, jb, jc, jd, je, jf) = tj_rows_g(ts_rows_l(), true);
@@ -444,12 +467,14 @@ const fn tjl_table() -> [TjRow; 130] {
         k += 1;
     }
     t
+}
 static TJL: [TjRow; 130] = tjl_table();
 
 const ZLANE: TsA = TsA { ctrl: [0x80; 16], base: [0; 16], lim: [0; 16], w1: [0; 16] };
 const fn xb(k: usize, raw: usize) -> u8 {
     assert!(k < raw && k + 16 >= raw);
     (k + 16 - raw) as u8
+}
 const fn ts_f2_l(q: bool) -> (TsA, TsB, TsC) {
     let (_, b, c) = ts_f12(true, q);
     let mut a = ZLANE;
@@ -495,6 +520,7 @@ const fn ts_f2_l(q: bool) -> (TsA, TsB, TsC) {
     a.ctrl[15] = xb(off + 11, raw);
     a.base[15] = b':';
     (a, b, c)
+}
 const fn ts_f3_l(n: usize) -> (TsA, TsB, TsC) {
     let (mut a, mut b, mut c) = (ZLANE, TSB_INVALID, TSC_INVALID);
     assert!(n >= 1 && n <= 14);
@@ -516,6 +542,7 @@ const fn ts_f3_l(n: usize) -> (TsA, TsB, TsC) {
     c.me = 10_000_000;
     c.mf = [1, 1];
     (a, b, c)
+}
 const fn ts_f3q_l() -> (TsA, TsB, TsC) {
     let (mut a, mut b, mut c) = (ZLANE, TSB_INVALID, TSC_INVALID);
     a.ctrl[0] = 1;
@@ -541,6 +568,7 @@ const fn ts_f3q_l() -> (TsA, TsB, TsC) {
     c.me = 1_000_000;
     c.mf = [1, 1];
     (a, b, c)
+}
 const fn ts_rows_l() -> ([TsA; 64], [TsB; 64], [TsC; 64]) {
     let mut ta = [TSA_INVALID; 64];
     let mut tb = [TSB_INVALID; 64];
@@ -568,9 +596,11 @@ const fn ts_rows_l() -> ([TsA; 64], [TsB; 64], [TsC; 64]) {
         k += 1;
     }
     (ta, tb, tc)
+}
 
 const fn tj_rows() -> ([TjA; 128], [TjB; 128], [TjC; 128], [TjD; 128], [TjE; 128], [TjF; 128]) {
     tj_rows_g(ts_rows(), false)
+}
 const fn tj_rows_g(r: ([TsA; 64], [TsB; 64], [TsC; 64]), lp: bool) -> ([TjA; 128], [TjB; 128], [TjC; 128], [TjD; 128], [TjE; 128], [TjF; 128]) {
     let (ta, tb, tc) = r;
     let mut ja = [TjA { ctrl: [0; 32], base: [0; 32] }; 128];
@@ -628,6 +658,7 @@ const fn tj_rows_g(r: ([TsA; 64], [TsB; 64], [TsC; 64]), lp: bool) -> ([TjA; 128
         j += 1;
     }
     (ja, jb, jc, jd, je, jf)
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -635,6 +666,7 @@ struct KindRow {
     cand: [[u8; 16]; 2],
     maskv: [u8; 16],
     k: [u32; 2],
+}
 
 const fn kind_row(c0: &[u8], k0: u32, c1: &[u8], k1: u32) -> KindRow {
     let mut r = KindRow { cand: [[0; 16]; 2], maskv: [0; 16], k: [k0, k1] };
@@ -646,6 +678,7 @@ const fn kind_row(c0: &[u8], k0: u32, c1: &[u8], k1: u32) -> KindRow {
         i += 1;
     }
     r
+}
 
 const fn kind_rows() -> [KindRow; 64] {
     let mut t = [KindRow { cand: [[b'\n'; 16]; 2], maskv: [0xFF; 16], k: [3, 3] }; 64];
@@ -654,6 +687,7 @@ const fn kind_rows() -> [KindRow; 64] {
     t[8] = kind_row(b"purchase", 2, b"purchase", 2);
     t[10] = kind_row(b"\"purchase\"", 2, b"\"purchase\"", 2);
     t
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -662,6 +696,7 @@ struct KindRow2 {
     maskv: [u8; 16],
     pp: u64,
     _pad: [u64; 3],
+}
 
 const fn kind_rows2() -> [KindRow2; 128] {
     let k = kind_rows();
@@ -675,6 +710,7 @@ const fn kind_rows2() -> [KindRow2; 128] {
         i += 1;
     }
     t
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -684,12 +720,14 @@ struct TailRow {
     pat: [u32; 4],
     pp: [u64; 4],
     adj: i64,
+}
 const TAIL_NO: u32 = u32::MAX;
 const TAIL_K: usize = 72;
 const TAIL_ROWS: usize = 63 * TAIL_K + 64;
 
 const fn tail_up(x: u32, sh: usize) -> u32 {
     if x == TAIL_NO { TAIL_NO } else { x << sh }
+}
 const fn tail_rows() -> [TailRow; TAIL_ROWS] {
     let mut t = [TailRow { sel: 0, m: 0, pat: [TAIL_NO; 4], pp: [PP_SOME; 4], adj: 0 }; TAIL_ROWS];
     let mut i = 0;
@@ -714,6 +752,7 @@ const fn tail_rows() -> [TailRow; TAIL_ROWS] {
         r5 += 1;
     }
     t
+}
 
 #[repr(C, align(64))]
 struct Tables {
@@ -734,6 +773,7 @@ struct Tables {
     prod: [DecShape; 128],
     camp: [DecShape; 128],
     camp4: [DecShape; 128],
+}
 
 static T: Tables = Tables {
     tsa: ts_rows().0,
@@ -761,6 +801,7 @@ struct DateEnt {
     key: [u8; 12],
     strikes: u32,
     ms: [i64; 2],
+}
 const DATE_PEXT: u64 = 0x0F03;
 
 const _: () = assert!(SCRATCH * 8 == 64 * core::mem::size_of::<DateEnt>() && SCRATCH_INIT == u64::from_le_bytes([b','; 8]));
@@ -770,6 +811,7 @@ const _: () = assert!(core::mem::offset_of!(DateEnt, ms) == 16 && SCRATCH_ZERO.s
 #[inline(always)]
 fn date_idx(dd: u16) -> usize {
     unsafe { _pext_u64(dd as u64, DATE_PEXT) as usize }
+}
 
 #[cold]
 #[inline(never)]
@@ -805,84 +847,102 @@ unsafe fn date_miss(kp: *const u8, quoted: bool, cache: *mut DateEnt) -> Option<
         }
         Some(ms)
     }
+}
 
 
 #[inline(always)]
 unsafe fn ld(p: *const u8) -> __m128i {
     unsafe { _mm_loadu_si128(p as *const __m128i) }
+}
 #[inline(always)]
 unsafe fn rd16(p: *const u8) -> u16 {
     unsafe { core::ptr::read_unaligned(p as *const u16) }
+}
 #[inline(always)]
 unsafe fn rd64(p: *const u8) -> u64 {
     unsafe { core::ptr::read_unaligned(p as *const u64) }
+}
 #[inline(always)]
 unsafe fn store_hi<const OFF: usize>(p: *mut i64, v: __m128i) {
     unsafe { core::arch::asm!("vmovhps qword ptr [{p} + {off}], {v}", p = in(reg) p, off = const OFF, v = in(xmm_reg) v, options(nostack, preserves_flags)) };
+}
 
 #[inline(always)]
 fn tz(mut x: u64) -> u64 {
     unsafe { core::arch::asm!("tzcnt {x}, {x}", x = inout(reg) x, options(pure, nomem, nostack)) };
     x
+}
 #[inline(always)]
 fn tz2(x: u64) -> u64 {
     let o: u64;
     unsafe { core::arch::asm!("tzcnt {o}, {x}", o = lateout(reg) o, x = in(reg) x, options(pure, nomem, nostack)) };
     o
+}
 #[inline(always)]
 fn blsr(mut x: u64) -> u64 {
     unsafe { core::arch::asm!("blsr {x}, {x}", x = inout(reg) x, options(pure, nomem, nostack)) };
     x
+}
 
 #[inline(always)]
 fn bzhi(a: u64, i: u64) -> u64 {
     let o: u64;
     unsafe { core::arch::asm!("bzhi {o}, {a}, {i}", o = lateout(reg) o, a = in(reg) a, i = in(reg) i, options(pure, nomem, nostack)) };
     o
+}
 
 #[inline(always)]
 fn lea3<const D: i32>(a: u64, b: u64) -> u64 {
     let o: u64;
     unsafe { core::arch::asm!("lea {o}, [{a} + {b} + {d}]", o = lateout(reg) o, a = in(reg) a, b = in(reg) b, d = const D, options(pure, nomem, nostack, preserves_flags)) };
     o
+}
 #[inline(always)]
 unsafe fn ld_xor(a: *const u8, m: *const u8) -> __m128i {
     let o: __m128i;
     unsafe { core::arch::asm!("vmovdqu {o}, xmmword ptr [{a}]", "vpxor {o}, {o}, xmmword ptr [{m}]", o = out(xmm_reg) o, a = in(reg) a, m = in(reg) m, options(pure, readonly, nostack, preserves_flags)) };
     o
+}
 #[inline(always)]
 unsafe fn and_m(v: __m128i, m: *const u8) -> __m128i {
     let o: __m128i;
     unsafe { core::arch::asm!("vpand {o}, {v}, xmmword ptr [{m}]", o = lateout(xmm_reg) o, v = in(xmm_reg) v, m = in(reg) m, options(pure, readonly, nostack, preserves_flags)) };
     o
+}
 #[inline(always)]
 fn jid_off(c0: u64, c1: u64) -> u64 {
     let o: u64;
     unsafe { core::arch::asm!("imul {o}, {a}, 63", "add {o}, {b}", "shl {o}, 7", o = lateout(reg) o, a = in(reg) c0, b = in(reg) c1, options(pure, nomem, nostack)) };
     o
+}
 #[inline(always)]
 fn add_sub<const D: i32>(a: u64, b: u64) -> u64 {
     let o: u64;
     unsafe { core::arch::asm!("lea {o}, [{a} + {d}]", "sub {o}, {b}", o = lateout(reg) o, a = in(reg) a, b = in(reg) b, d = const D, options(pure, nomem, nostack)) };
     o
+}
 #[inline(always)]
 unsafe fn xor_lo(y: __m256i, a: *const u8, b: usize) -> __m128i {
     let o: __m128i;
     unsafe { core::arch::asm!("vpxor {o}, {y:x}, xmmword ptr [{a} + {b}]", o = lateout(xmm_reg) o, y = in(ymm_reg) y, a = in(reg) a, b = in(reg) b, options(pure, readonly, nostack, preserves_flags)) };
     o
+}
 
 #[inline(always)]
 fn nz(v: __m128i) -> bool {
     unsafe { _mm_cvtsi128_si64(_mm_or_si128(v, _mm_unpackhi_epi64(v, v))) != 0 }
+}
 
 struct Masks {
     c: u64,
     q: u64,
     n: u64,
+}
 
 #[inline(always)]
 unsafe fn masks(p: *const u8) -> Masks {
     unsafe { Masks { c: eq64(p, b','), q: eq64(p, b'"'), n: eq64(p, b'\n') } }
+}
 
 #[inline(always)]
 unsafe fn eq64(p: *const u8, c: u8) -> u64 {
@@ -897,10 +957,12 @@ unsafe fn eq64(p: *const u8, c: u8) -> u64 {
         )
     };
     m
+}
 
 #[inline(always)]
 fn hi32(v: __m256i, c: u8) -> u64 {
     unsafe { (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32 as u64) << 32 }
+}
 
 #[inline(always)]
 unsafe fn ts_date(rs: *const u8, raw: usize, cache: *mut DateEnt) -> (i64, __m128i, *const u8) {
@@ -911,6 +973,7 @@ unsafe fn ts_date(rs: *const u8, raw: usize, cache: *mut DateEnt) -> (i64, __m12
         let keybad = _mm_and_si128(_mm_xor_si128(ld(kp), ld(ent as *const u8)), ld(b.kmaskv.as_ptr()));
         ((*ent).ms[0], keybad, kp)
     }
+}
 
 #[inline(always)]
 unsafe fn ts_time<const FULL: bool>(rend: *const u8, raw: usize, day_ms: i64) -> (i64, __m128i) {
@@ -932,6 +995,7 @@ unsafe fn ts_time<const FULL: bool>(rend: *const u8, raw: usize, day_ms: i64) ->
         };
         (val, bad)
     }
+}
 
 #[inline(always)]
 unsafe fn ids2(xa: __m128i, sa: &IdShape, xb: __m128i, sb: &IdShape) -> (u64, u64, __m128i) {
@@ -939,6 +1003,7 @@ unsafe fn ids2(xa: __m128i, sa: &IdShape, xb: __m128i, sb: &IdShape) -> (u64, u6
         let (ids, bad) = ids2v(xa, sa, xb, sb);
         (_mm_cvtsi128_si64(ids) as u64, _mm_extract_epi64::<1>(ids) as u64, bad)
     }
+}
 
 #[inline(always)]
 unsafe fn ids2v(xa: __m128i, sa: &IdShape, xb: __m128i, sb: &IdShape) -> (__m128i, __m128i) {
@@ -958,6 +1023,7 @@ unsafe fn ids2v(xa: __m128i, sa: &IdShape, xb: __m128i, sb: &IdShape) -> (__m128
         let ids = _mm_add_epi64(_mm_mul_epu32(m2, _mm_set1_epi64x(1_679_616)), _mm_srli_epi64::<32>(m2));
         (_mm_or_si128(ids, ld(sb.orv.as_ptr() as *const u8)), bad)
     }
+}
 
 #[inline(always)]
 unsafe fn ids2j(xa: __m128i, xb: __m128i, r: &JidRow) -> (__m256i, __m256i) {
@@ -978,6 +1044,7 @@ unsafe fn ids2j(xa: __m128i, xb: __m128i, r: &JidRow) -> (__m256i, __m256i) {
         let ids = _mm256_add_epi64(hi, _mm256_srli_epi64::<32>(m2));
         (_mm256_or_si256(ids, ld2(r.orv.as_ptr() as *const u8)), _mm256_or_si256(cls, lz))
     }
+}
 
 #[inline(always)]
 unsafe fn dec(x: __m128i, s: &DecShape) -> (u32, __m128i) {
@@ -990,6 +1057,7 @@ unsafe fn dec(x: __m128i, s: &DecShape) -> (u32, __m128i) {
         let m3 = _mm_madd_epi16(_mm_packus_epi32(m2, m2), _mm_set_epi64x(0, 0x0001_2710));
         (_mm_cvtsi128_si32(m3) as u32, bad)
     }
+}
 
 #[inline(always)]
 unsafe fn dec4(x: __m128i, s: &DecShape) -> (__m128i, __m128i) {
@@ -1000,6 +1068,7 @@ unsafe fn dec4(x: __m128i, s: &DecShape) -> (__m128i, __m128i) {
         let m1 = _mm_maddubs_epi16(v, _mm_set_epi64x(0, 0x010A_010A));
         (_mm_madd_epi16(m1, _mm_set_epi64x(0, 0x0001_0064)), bad)
     }
+}
 
 #[inline(always)]
 unsafe fn kind_of(rs: *const u8, raw: usize) -> (u32, __m128i) {
@@ -1009,6 +1078,7 @@ unsafe fn kind_of(rs: *const u8, raw: usize) -> (u32, __m128i) {
         let bad = _mm_and_si128(_mm_xor_si128(ld(rs), ld(kr.cand.get_unchecked(f).as_ptr())), ld(kr.maskv.as_ptr()));
         (*kr.k.get_unchecked(f), bad)
     }
+}
 
 #[inline(always)]
 unsafe fn price(end: *const u8, len: usize) -> Option<u32> {
@@ -1029,6 +1099,7 @@ unsafe fn price(end: *const u8, len: usize) -> Option<u32> {
         let v = (y.wrapping_mul(42_949_672_960_001) >> 32) as u32;
         Some(if v.wrapping_sub(1) < 10_000_000 { v } else { 0 })
     }
+}
 
 
 #[cold]
@@ -1044,6 +1115,7 @@ unsafe fn cold_ids(base: *const u8, len: usize, a0: usize, b0: usize, prefix: u8
         return None;
     }
     Some((slow::parse_id(buf, v0, prefix), slow::parse_id(buf, v1, b'u')))
+}
 
 #[cold]
 #[inline(never)]
@@ -1055,6 +1127,7 @@ unsafe fn cold_ts(base: *const u8, len: usize, a: usize, b: usize, f1_only: bool
         return None;
     };
     Some(if f1_only { slow::parse_f1(&buf[s..e]) } else { slow::parse_ts(&buf[s..e]) })
+}
 
 #[cold]
 #[inline(never)]
@@ -1063,6 +1136,7 @@ unsafe fn cold_kind(base: *const u8, len: usize, a: usize, b: usize) -> Option<u
     let buf = unsafe { core::slice::from_raw_parts(base, len) };
     let (s, e) = slow::field_value(buf, a, b)?;
     Some(slow::parse_kind(&buf[s..e]) as u32)
+}
 
 #[cold]
 #[inline(never)]
@@ -1071,6 +1145,7 @@ unsafe fn cold_dec(base: *const u8, len: usize, a: usize, b: usize, product: boo
     let buf = unsafe { core::slice::from_raw_parts(base, len) };
     let (s, e) = slow::field_value(buf, a, b)?;
     Some(if product { slow::parse_product(&buf[s..e]) } else { slow::parse_campaign(&buf[s..e]) })
+}
 
 
 const FAIL: usize = usize::MAX;
@@ -1088,6 +1163,7 @@ unsafe fn ts_careful<const FULL: bool>(rs: *const u8, raw: usize, cache: *mut Da
         let (v, bad) = ts_time::<FULL>(rs.wrapping_add(raw), raw, day);
         if nz(bad) { None } else { Some(v) }
     }
+}
 
 macro_rules! or_cold {
     ($fast:expr, $cold:expr) => {
@@ -1099,6 +1175,7 @@ macro_rules! or_cold {
             },
         }
     };
+}
 
 #[inline(always)]
 unsafe fn ev_core<S: EventSink, const CHAIN: bool>(
@@ -1181,6 +1258,7 @@ unsafe fn ev_core<S: EventSink, const CHAIN: bool>(
         sink.event(&EvRow { eid, uid, ts, ingest, kind: kind as u8, product, price: pr });
         e
     }
+}
 
 struct Cx<B, S> {
     base: *const u8,
@@ -1188,6 +1266,7 @@ struct Cx<B, S> {
     b: *mut B,
     cache: *mut DateEnt,
     sink: *mut S,
+}
 
 const FB: usize = 32;
 
@@ -1196,6 +1275,7 @@ struct EvMasks {
     w1c: u64,
     wbc: u64,
     wn: u64,
+}
 
 #[inline(always)]
 unsafe fn ev_masks(p: *const u8) -> EvMasks {
@@ -1219,6 +1299,7 @@ unsafe fn ev_masks(p: *const u8) -> EvMasks {
         );
         EvMasks { w1c, wbc, wn }
     }
+}
 impl EvMasks {
     #[inline(always)]
     fn m(&self) -> u64 {
@@ -1232,6 +1313,7 @@ impl EvMasks {
     fn here(self) -> EvMasks {
         EvMasks { w1c: here_k(self.w1c), wbc: here_k(self.wbc), wn: here_k(self.wn) }
     }
+}
 
 #[unsafe(naked)]
 unsafe extern "C" fn keep_k() {
@@ -1258,6 +1340,7 @@ unsafe extern "C" fn keep_k() {
         "add rsp, 72",
         "ret",
     )
+}
 macro_rules! kcall {
     ($f:expr, $a0:expr, $a1:expr, $a2:expr, $a3:expr) => {{
         core::hint::cold_path();
@@ -1278,6 +1361,7 @@ macro_rules! kcall {
         );
         (r0, r1)
     }};
+}
 #[repr(C)]
 struct Pair(u64, u64);
 
@@ -1285,10 +1369,12 @@ struct Pair(u64, u64);
 #[inline(never)]
 unsafe extern "C" fn flush_ev<S: EventSink>(sink: *mut S) {
     unsafe { (*sink).ev_flush() }
+}
 #[cold]
 #[inline(never)]
 unsafe extern "C" fn flush_ck<S: ClickSink>(sink: *mut S) {
     unsafe { (*sink).ck_flush() }
+}
 
 #[cold]
 #[inline(never)]
@@ -1304,6 +1390,7 @@ unsafe extern "C" fn ev_cold<S: EventSink>(cx: *const Cx<EvBatch, S>, p: *const 
         let next = if r != FAIL { r + 1 } else { scan_event(core::slice::from_raw_parts(base, len), l, sink) };
         Pair(base.wrapping_add(next) as u64, (*b).ts.as_mut_ptr().add((*b).n) as u64)
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -1317,6 +1404,7 @@ unsafe fn fix_ts(base: *const u8, len: usize, a: usize, b: usize, cache: *mut Da
             None => cold_ts(base, len, a, b, false),
         }
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -1331,6 +1419,7 @@ unsafe fn fix_slot<B, S>(cx: &Cx<B, S>, p: *const u8, a: usize, b: usize, s: *mu
             None => false,
         }
     }
+}
 
 
 #[derive(Clone, Copy)]
@@ -1340,6 +1429,7 @@ struct EvSt {
     days: __m256i,
     bad2: __m256i,
     bad: __m256i,
+}
 
 #[inline(always)]
 unsafe fn ev_s<S: EventSink, const TAIL: bool>(cx: &Cx<EvBatch, S>, p: *const u8, k: EvMasks, s: *mut i64) -> Option<EvSt> {
@@ -1399,6 +1489,7 @@ unsafe fn ev_s<S: EventSink, const TAIL: bool>(cx: &Cx<EvBatch, S>, p: *const u8
         let bad = _mm256_or_si256(bad_i, _mm256_zextsi128_si256(_mm_or_si128(bad_k3, bad_kind)));
         Some(EvSt { jo, x, days: _mm256_permute2x128_si256::<0x31>(y2, y3), bad2: _mm256_or_si256(bad, _mm256_zextsi128_si256(bad_k2)), bad })
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -1407,6 +1498,7 @@ unsafe extern "C" fn ev_fix<S: EventSink>(cx: *const Cx<EvBatch, S>, p: *const u
         let t = _blsr_u64(eq64(p, b','));
         fix_slot(&*cx, p, t.trailing_zeros() as usize + 1, _blsr_u64(t).trailing_zeros() as usize, s) as u64
     }
+}
 
 #[inline(always)]
 unsafe fn ev_d<S: EventSink>(cx: &Cx<EvBatch, S>, p: *const u8, st: EvSt, np: *const u8, w: &mut *mut i64, lim: *const u8) -> *const u8 {
@@ -1462,6 +1554,7 @@ unsafe fn ev_d<S: EventSink>(cx: &Cx<EvBatch, S>, p: *const u8, st: EvSt, np: *c
         }
         np
     }
+}
 
 #[inline(always)]
 unsafe fn ev_fast<S: EventSink, const TAIL: bool>(cx: &Cx<EvBatch, S>, p: *const u8, k: EvMasks, np: *const u8, w: &mut *mut i64) -> *const u8 {
@@ -1475,6 +1568,7 @@ unsafe fn ev_fast<S: EventSink, const TAIL: bool>(cx: &Cx<EvBatch, S>, p: *const
             }
         }
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -1501,11 +1595,13 @@ unsafe extern "C" fn ev_purchase(p: *const u8, np: *const u8, s: *mut i64) -> u6
         *(s.byte_add(core::mem::offset_of!(EvBatch, pp)) as *mut u64) = prod as u64 | (pr as u64) << 32 | 2 << 56 | if pr == 0 { PP_INVALID } else { 0 };
         1
     }
+}
 
 #[derive(Clone, Copy)]
 struct ClMasks {
     c: u64,
     q: u64,
+}
 
 #[inline(always)]
 unsafe fn cl_masks(p: *const u8) -> (ClMasks, u64) {
@@ -1513,6 +1609,7 @@ unsafe fn cl_masks(p: *const u8) -> (ClMasks, u64) {
         let w = masks(p);
         (ClMasks { c: w.c, q: w.q }, tz(w.n))
     }
+}
 
 #[inline(always)]
 unsafe fn cl_core<S: ClickSink, const CHAIN: bool, const CAREFUL: bool>(
@@ -1565,11 +1662,13 @@ unsafe fn cl_core<S: ClickSink, const CHAIN: bool, const CAREFUL: bool>(
         sink.click(&ClRow { cid, uid, campaign, ts });
         e
     }
+}
 
 #[derive(Clone, Copy)]
 struct CkMasks {
     c: u64,
     n: u64,
+}
 
 #[inline(always)]
 unsafe fn ck_masks(p: *const u8) -> CkMasks {
@@ -1588,6 +1687,7 @@ unsafe fn ck_masks(p: *const u8) -> CkMasks {
         );
         CkMasks { c, n }
     }
+}
 impl CkMasks {
     #[inline(always)]
     fn m(&self) -> u64 {
@@ -1605,6 +1705,7 @@ impl CkMasks {
             CkMasks { c: here(self.c), n: here(self.n) }
         }
     }
+}
 const CK_KREG: bool = true;
 
 #[cold]
@@ -1622,6 +1723,7 @@ unsafe extern "C" fn cl_cold<S: ClickSink>(cx: *const Cx<CkBatch, S>, p: *const 
         let next = if r != FAIL { r + 1 } else { scan_click(core::slice::from_raw_parts(base, len), l, sink) };
         Pair(base.wrapping_add(next) as u64, (*b).ts.as_mut_ptr().add((*b).n) as u64)
     }
+}
 
 #[derive(Clone, Copy)]
 struct ClSt {
@@ -1630,6 +1732,7 @@ struct ClSt {
     days: __m128i,
     bad_k: __m128i,
     bad: __m128i,
+}
 
 #[inline(always)]
 unsafe fn cl_s<S: ClickSink, const TAIL: bool>(cx: &Cx<CkBatch, S>, p: *const u8, k: CkMasks, s: *mut i64) -> Option<ClSt> {
@@ -1663,6 +1766,7 @@ unsafe fn cl_s<S: ClickSink, const TAIL: bool>(cx: &Cx<CkBatch, S>, p: *const u8
         let bad_k = _mm_and_si128(_mm_xor_si128(ld(kp), ld(ent as *const u8)), ld(jd.kmask2.as_ptr()));
         Some(ClSt { jo, x: ld(p.wrapping_add(nl).wrapping_sub(16)), days: ld((ent as *const u8).add(16)), bad_k, bad: _mm_or_si128(bad_id, bad_c) })
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -1671,6 +1775,7 @@ unsafe extern "C" fn cl_fix<S: ClickSink>(cx: *const Cx<CkBatch, S>, p: *const u
         let t = _blsr_u64(_blsr_u64(masks(p).c));
         fix_slot(&*cx, p, t.trailing_zeros() as usize + 1, np.offset_from(p) as usize - 1, s) as u64
     }
+}
 
 #[inline(always)]
 unsafe fn cl_d<S: ClickSink>(cx: &Cx<CkBatch, S>, p: *const u8, st: ClSt, np: *const u8, w: &mut *mut i64) -> *const u8 {
@@ -1714,6 +1819,7 @@ unsafe fn cl_d<S: ClickSink>(cx: &Cx<CkBatch, S>, p: *const u8, st: ClSt, np: *c
         }
         np
     }
+}
 
 #[inline(always)]
 unsafe fn cl_fast<S: ClickSink, const TAIL: bool>(cx: &Cx<CkBatch, S>, p: *const u8, k: CkMasks, np: *const u8, w: &mut *mut i64) -> *const u8 {
@@ -1727,6 +1833,7 @@ unsafe fn cl_fast<S: ClickSink, const TAIL: bool>(cx: &Cx<CkBatch, S>, p: *const
             }
         }
     }
+}
 
 const PIPE: u8 = 0;
 const PFD: usize = 1024;
@@ -1737,15 +1844,18 @@ const NO_LIM: *const u8 = usize::MAX as *const u8;
 #[inline(always)]
 fn tag_far(r: *const u8, lim: *const u8) -> *const u8 {
     if r > lim { (r as usize | TAG) as *const u8 } else { r }
+}
 
 #[inline(always)]
 fn here(mut v: u64) -> u64 {
     unsafe { core::arch::asm!("/* {0} */", inout(reg) v, options(nomem, nostack, preserves_flags)) };
     v
+}
 #[inline(always)]
 fn here_k(mut v: u64) -> u64 {
     unsafe { core::arch::asm!("/* {0} */", inout(kreg) v, options(nomem, nostack, preserves_flags)) };
     v
+}
 
 #[cold]
 #[inline(never)]
@@ -1757,6 +1867,7 @@ fn scan_event<S: EventSink>(buf: &[u8], pos: usize, sink: &mut S) -> usize {
     };
     slow::event(buf, pos, e, sink);
     e + 1
+}
 #[cold]
 #[inline(never)]
 fn scan_click<S: ClickSink>(buf: &[u8], pos: usize, sink: &mut S) -> usize {
@@ -1767,6 +1878,7 @@ fn scan_click<S: ClickSink>(buf: &[u8], pos: usize, sink: &mut S) -> usize {
     };
     slow::click(buf, pos, e, sink);
     e + 1
+}
 
 macro_rules! runner {
     ($name:ident, $sink:ident, $get:ident, $line:ident, $masks:ident, $adv:expr, $scan:ident) => {
@@ -1822,6 +1934,7 @@ macro_rules! runner {
             }
         }
     };
+}
 runner!(run_events, EventSink, ev, ev_fast, ev_masks, OB, scan_event);
 
 #[repr(C, align(128))]
@@ -1830,6 +1943,7 @@ struct EjRow {
     ctrl: [u8; 32],
     subv: [u8; 32],
     _pad: [u8; 64],
+}
 const EJ_E: usize = 32 * 8 + 32 + 16 + 1;
 const EJ_ROWS: usize = EJ_E + 32;
 const fn ej_lane(r: &mut EjRow, o: usize, s: &IdShape, sh: i32) {
@@ -1856,6 +1970,7 @@ const fn ej_lane(r: &mut EjRow, o: usize, s: &IdShape, sh: i32) {
         }
         i += 1;
     }
+}
 const fn ej_rows() -> [EjRow; EJ_ROWS] {
     let e = id_shapes_raw(b'e', 8, 0, false);
     let u = id_shapes_raw(b'u', 8, 0, true);
@@ -1896,6 +2011,7 @@ const fn ej_rows() -> [EjRow; EJ_ROWS] {
         c0 += 1;
     }
     t
+}
 static EJ: [EjRow; EJ_ROWS] = ej_rows();
 
 #[repr(C, align(64))]
@@ -1907,6 +2023,7 @@ struct KindRow3 {
     tlk: i64,
     pthr: u64,
     isp: u64,
+}
 const fn kind3(t: &mut [KindRow3; 256], s: &[u8], kind: u64) {
     let n = s.len();
     assert!(n + 2 <= 16);
@@ -1929,6 +2046,7 @@ const fn kind3(t: &mut [KindRow3; 256], s: &[u8], kind: u64) {
         r.isp = 1;
     }
     t[s[1] as usize] = r;
+}
 const fn kind_rows3() -> [KindRow3; 256] {
     let mut t = [KindRow3 { cand: [0; 16], maskv: [0; 16], pp: 0, tlk: 4 - 40 - TL2_SOFF as i64 - 2 * TL2_P as i64, pthr: u64::MAX, isp: 0 }; 256];
     kind3(&mut t, b"view", 0);
@@ -1938,6 +2056,7 @@ const fn kind_rows3() -> [KindRow3; 256] {
     kind3(&mut t, b"\"cart\"", 1);
     kind3(&mut t, b"\"purchase\"", 2);
     t
+}
 static K3: [KindRow3; 256] = kind_rows3();
 
 #[repr(C, align(64))]
@@ -1949,6 +2068,7 @@ struct TailRow2 {
     pat: [u64; 4],
     pp: u64,
     _p1: u64,
+}
 const TL2_P: usize = 72;
 const TL2_S: usize = 3 * TL2_P;
 const TL2_SOFF: usize = 36;
@@ -1991,6 +2111,7 @@ const fn tail_rows2() -> [TailRow2; TL2_R6 * TL2_S] {
     pl += 1;
     }
     t
+}
 static TL2: [TailRow2; TL2_R6 * TL2_S] = tail_rows2();
 
 #[repr(C, align(64))]
@@ -2007,6 +2128,7 @@ struct EvConst {
     quote: [u8; 32],
     pidx: [u64; 4],
     xidx: [u64; 4],
+}
 const fn ev_const() -> EvConst {
     let mut c = EvConst { e: [0; 32], diglim: [0; 32], letlim: [0; 32], m39: [217; 32], w124: [0x0124; 16], w510: [0x0001_0510; 8], m36: [1_679_616; 4], comma: [b','; 32], nl: [b'\n'; 32], quote: [b'"'; 32], pidx: [1, 5, 2, 6], xidx: [0, 1, 6, 7] };
     let mut i = 0;
@@ -2024,6 +2146,7 @@ const fn ev_const() -> EvConst {
         i += 1;
     }
     c
+}
 static EVC: EvConst = ev_const();
 const _: () = assert!(
     core::mem::offset_of!(EvConst, m39) == 96
@@ -2097,6 +2220,7 @@ unsafe extern "C" fn ev_redo<S: EventSink>(cx: *const Cx<EvBatch, S>, p: *const 
         let np = ev_fast::<S, false>(&*cx, p, k, k.next(p), &mut w);
         Pair(np as u64, w as u64)
     }
+}
 
 macro_rules! ev_consts {
     () => {
@@ -2116,6 +2240,7 @@ macro_rules! ev_consts {
             "kmovd k1, eax\n",
         )
     };
+}
 macro_rules! ev_save_b {
     () => {
         concat!(
@@ -2131,6 +2256,7 @@ macro_rules! ev_save_b {
             "vmovdqu64 ymmword ptr [rsp + 384], ymm23\n",
         )
     };
+}
 macro_rules! ev_restore_b {
     () => {
         concat!(
@@ -2147,6 +2273,7 @@ macro_rules! ev_restore_b {
             ev_consts!(),
         )
     };
+}
 macro_rules! ev_next {
     () => {
         concat!(
@@ -2158,6 +2285,7 @@ macro_rules! ev_next {
             "lea rdi, [rdi + rax + 33]\n",
         )
     };
+}
 macro_rules! ev_mk {
     ($a:literal, $b:literal, $cl:literal, $ch:literal) => {
         concat!(
@@ -2170,6 +2298,7 @@ macro_rules! ev_mk {
             "prefetcht0 byte ptr [", $a, " + {PFD}]\n",
         )
     };
+}
 macro_rules! ev_dec {
     ($jo:literal, $x:literal, $d:literal, $b2:literal, $all:literal, $r:literal) => {
         concat!(
@@ -2190,6 +2319,7 @@ macro_rules! ev_dec {
             "vpternlogq ", $all, ", ymm2, ", $b2, ", 0xfe\n",
         )
     };
+}
 macro_rules! ev_hd {
     ($b:literal, $cl:literal, $ch:literal) => {
         concat!(
@@ -2203,6 +2333,7 @@ macro_rules! ev_hd {
             "sub rdx, r9\n",
         )
     };
+}
 macro_rules! ev_st {
     ($b:literal, $jo:literal, $x:literal, $d:literal, $b2:literal, $b2x:literal, $v:literal, $ids:expr, $fail:literal, $plab:literal, $pret:literal, $ppst:literal) => {
         concat!(
@@ -2272,10 +2403,12 @@ macro_rules! ev_st {
             $ppst,
         )
     };
+}
 macro_rules! ev_ids_ab {
     () => {
         "vpunpckhqdq ymm3, ymm22, ymm3\nvpaddb ymm4, ymm3, ymmword ptr [rip + {EVC} + 96]\nvpminub ymm3, ymm3, ymm4\nvpmaddubsw ymm3, ymm3, ymmword ptr [rip + {EVC} + 128]\nvpmaddwd ymm3, ymm3, ymmword ptr [rip + {EVC} + 160]\nvpmuludq ymm4, ymm3, ymmword ptr [rip + {EVC} + 192]\nvpsrlq ymm3, ymm3, 32\nvpaddq ymm3, ymm3, ymm4\nvmovdqu xmmword ptr [r15 + rbx + {EID}], xmm3\nvmovdqu64 ymmword ptr [r15 + rbx + {UID} - 16] {{k1}}, ymm3\n"
     };
+}
 macro_rules! ev_retry {
     ($lab:literal, $b:literal, $cl:literal, $a:literal, $jo:literal, $x:literal, $d:literal, $b2:literal, $b2x:literal, $v:literal, $ids:expr, $real:literal, $pl:literal, $pr:literal, $ret:literal) => {
         concat!(
@@ -2300,6 +2433,7 @@ macro_rules! ev_retry {
             ev_pur!($pl, $pr, $real, $a, $b, ev_save_b, ev_restore_b),
         )
     };
+}
 macro_rules! ev_pur {
     ($plab:literal, $pret:literal, $fail:literal, $a:literal, $b:literal, $save:ident, $restore:ident) => {
         concat!(
@@ -2387,6 +2521,7 @@ macro_rules! ev_pur {
             "jmp ", $pret, "b\n",
         )
     };
+}
 
 #[repr(C, align(64))]
 struct PuConst([u64; 8]);
@@ -2745,6 +2880,7 @@ unsafe fn ev_loop<S: EventSink>(p: *const u8, w: *mut i64, b: *mut EvBatch, cx: 
         );
     }
     (code, np, nw)
+}
 
 
 
@@ -2765,6 +2901,7 @@ struct CtsRow {
     koff1: i64,
     pmask: u64,
     _pad: [u64; 8],
+}
 const CTS_ROWS: usize = 65;
 const fn cts_rows() -> [CtsRow; CTS_ROWS] {
     let (ja, jb, jc, jd, je, jf) = tj_rows();
@@ -2959,6 +3096,7 @@ const fn cts_rows() -> [CtsRow; CTS_ROWS] {
         q += 1;
     }
     t
+}
 static CTS: [CtsRow; CTS_ROWS] = cts_rows();
 
 #[repr(C, align(64))]
@@ -2968,6 +3106,7 @@ struct CampRow {
     subv: [u8; 16],
     lim: [u8; 16],
     _pad: [u8; 16],
+}
 const CAMPB_ROWS: usize = 320;
 const CAMPB_OFF: usize = 64 * 64;
 const fn campb_rows() -> [CampRow; CAMPB_ROWS] {
@@ -3021,6 +3160,7 @@ const fn campb_rows() -> [CampRow; CAMPB_ROWS] {
         q += 1;
     }
     t
+}
 static CAMPB: [CampRow; CAMPB_ROWS] = campb_rows();
 
 const CTJ_CLASSES: usize = 8;
@@ -3030,6 +3170,7 @@ const fn ctj_shape_idx(k: usize) -> usize {
     let raw = 2 + nd + 2 * q;
     let b = if q == 1 { b'"' } else { b'c' } as usize;
     b + 64 - 2 * (raw + 1)
+}
 
 
 #[repr(C, align(128))]
@@ -3039,6 +3180,7 @@ struct CjRow {
     subv: [u8; 32],
     thr: [i64; 4],
     _pad: [u8; 32],
+}
 const fn cj_thr(lz: &[u8; 16]) -> i64 {
     let mut thr = -1i64;
     let mut j = 0;
@@ -3061,6 +3203,7 @@ const fn cj_thr(lz: &[u8; 16]) -> i64 {
         j += 1;
     }
     thr
+}
 const CJ_ROWS: usize = 32 * 8 + 32 + 1;
 const fn cj_rows() -> [CjRow; CJ_ROWS] {
     let k = id_shapes_raw(b'k', 0, 8, false);
@@ -3110,6 +3253,7 @@ const fn cj_rows() -> [CjRow; CJ_ROWS] {
         c0 += 1;
     }
     t
+}
 static CJ: [CjRow; CJ_ROWS] = cj_rows();
 
 #[repr(C, align(64))]
@@ -3128,6 +3272,7 @@ struct ClConst {
     ksel: [u64; 2],
     lm0: [u64; 4],
     lm1: [u64; 4],
+}
 const fn cl_const() -> ClConst {
     let mut c = ClConst { comma: [b','; 32], nl: [b'\n'; 32], e: [0; 32], letlim: [0; 32], diglim: [0; 32], m39: [217; 32], w1: [0x0124; 16], w2: [0x0001_0510; 8], w3: [1_679_616; 4], cw1: [0; 16], cw2: [0; 4], ksel: [0, 0x80 << 56], lm0: [u64::MAX, u64::MAX, 0, 0], lm1: [0, 0, u64::MAX, u64::MAX] };
     let mut i = 0;
@@ -3142,6 +3287,7 @@ const fn cl_const() -> ClConst {
     c.cw1 = [10, 1, 10, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     c.cw2 = [0x0001_0064, 0, 0, 0];
     c
+}
 static CLC: ClConst = cl_const();
 const _: () = assert!(
     core::mem::size_of::<CjRow>() == 128
@@ -3255,6 +3401,7 @@ macro_rules! cl_ms {
     (@kmask b, $badx:literal) => { concat!("vpandq ", $badx, ", ", $badx, ", xmmword ptr [{TJ} + r14 + {TD} + 304]\n") };
     (@days a) => { "vmovdqu64 xmm9, xmmword ptr [r15 + r9 + {SCR} + 16]\n" };
     (@days b) => { "vmovdqu64 ymm9{{k3}}, ymmword ptr [r15 + r9 + {SCR}]\n" };
+}
 macro_rules! cl_dp {
     ($o:literal, $v:literal) => {
         concat!(
@@ -3288,6 +3435,7 @@ macro_rules! cl_dp {
             "vmovdqu64 ymmword ptr [r15 + rbx + ", $o, " - 40 + {UIDO}]{{k2}}, ymm7\n",
         )
     };
+}
 
 #[repr(C, align(32))]
 #[derive(Clone, Copy)]
@@ -3307,6 +3455,7 @@ struct Tj2Row {
     pmask_a: u64,
     koff_b: i64,
     pmask_b: u64,
+}
 const TJ2_ROWS: usize = CTS_ROWS * CTS_ROWS;
 const TJ2_SIZE: usize = 352;
 const fn tj2_rows() -> [Tj2Row; TJ2_ROWS] {
@@ -3357,6 +3506,7 @@ const fn tj2_rows() -> [Tj2Row; TJ2_ROWS] {
         ia += 1;
     }
     t
+}
 static TJ2: [Tj2Row; TJ2_ROWS] = tj2_rows();
 const _: () = assert!(
     core::mem::size_of::<Tj2Row>() == TJ2_SIZE
@@ -3383,6 +3533,7 @@ struct Cj2Row {
     subv: [u8; 32],
     lim: [u8; 32],
     _pad: [u8; 32],
+}
 const fn cj2_rows() -> [Cj2Row; CTJ_CLASSES * CTJ_CLASSES] {
     let camp = campb_rows();
     let mut t = [Cj2Row { ctrl: [0; 32], subv: [0; 32], lim: [0; 32], _pad: [0; 32] }; CTJ_CLASSES * CTJ_CLASSES];
@@ -3409,6 +3560,7 @@ const fn cj2_rows() -> [Cj2Row; CTJ_CLASSES * CTJ_CLASSES] {
         ka += 1;
     }
     t
+}
 static CJ2: [Cj2Row; CTJ_CLASSES * CTJ_CLASSES] = cj2_rows();
 const fn cj2_class(stride: u32) -> [u32; CAMPB_ROWS] {
     let mut t = [0u32; CAMPB_ROWS];
@@ -3422,6 +3574,7 @@ const fn cj2_class(stride: u32) -> [u32; CAMPB_ROWS] {
         k += 1;
     }
     t
+}
 static CJ2_A: [u32; CAMPB_ROWS] = cj2_class(128 * CTJ_CLASSES as u32);
 static CJ2_B: [u32; CAMPB_ROWS] = cj2_class(128);
 const _: () = assert!(core::mem::size_of::<Cj2Row>() == 128);
@@ -3433,6 +3586,7 @@ struct ClFlush {
     f: unsafe extern "C" fn(*mut u8),
     sink: *mut u8,
     lim: *const u8,
+}
 const C_N: usize = core::mem::offset_of!(CkBatch, n) - 512;
 macro_rules! cl_consts {
     () => {
@@ -3456,6 +3610,7 @@ macro_rules! cl_consts {
             "kmovw k4, eax\n",
         )
     };
+}
 #[inline(never)]
 unsafe fn cl_loop(p: *const u8, w: *mut i64, b512: *mut u8, fl: &ClFlush) -> (u64, *const u8, *mut i64) {
     let (code, np, nw): (u64, *const u8, *mut i64);
@@ -3587,6 +3742,7 @@ unsafe fn cl_loop(p: *const u8, w: *mut i64, b512: *mut u8, fl: &ClFlush) -> (u6
         );
     }
     (code, np, nw)
+}
 
 #[inline(never)]
 unsafe fn run_clicks<S: ClickSink, const MODE: u8>(buf: &[u8], sink: &mut S) {
@@ -3645,6 +3801,7 @@ unsafe fn run_clicks<S: ClickSink, const MODE: u8>(buf: &[u8], sink: &mut S) {
             pos = scan_click(buf, pos, &mut *sink);
         }
     }
+}
 
 mod slow {
     use crate::iface::*;
@@ -3878,3 +4035,4 @@ mod slow {
             ts: parse_ts(val(3)),
         });
     }
+}

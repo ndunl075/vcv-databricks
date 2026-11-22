@@ -8,10 +8,12 @@ pub const UF_TAIL_IN_STAGE3: () = ();
 #[inline(always)]
 fn user_of(r: &Rec) -> u32 {
     ((r.w1 >> 37) & (ODDU - 1)) as u32
+}
 
 #[inline(always)]
 pub fn cpush(t: &mut TState, pkey: u64, w0: u64) {
     t.cx_ev[shard(pkey)].push(Rec { w0, w1: pkey });
+}
 
 pub fn cid_cmp(g: &G, a: u64, b: u64) -> std::cmp::Ordering {
     if (a | b) & RAW == 0 {
@@ -21,6 +23,7 @@ pub fn cid_cmp(g: &G, a: u64, b: u64) -> std::cmp::Ordering {
     g.id_str(a, b'k', &mut sa);
     g.id_str(b, b'k', &mut sb);
     sa.cmp(&sb)
+}
 
 pub unsafe fn process_run(g: &G, t: &mut TState, u: u32, recs: &mut [Rec]) {
     t.n_runs += 1;
@@ -32,6 +35,7 @@ pub unsafe fn process_run(g: &G, t: &mut TState, u: u32, recs: &mut [Rec]) {
         return simple_run(g, t, u, &mut buf, tv);
     }
     simple_run(g, t, u, recs, tv)
+}
 
 unsafe fn simple_run(g: &G, t: &mut TState, u: u32, recs: &mut [Rec], tv: u16) {
     if tv & COMPLEX != 0 {
@@ -71,6 +75,7 @@ unsafe fn simple_run(g: &G, t: &mut TState, u: u32, recs: &mut [Rec], tv: u16) {
         t.core.feed(&mut st, r.w0);
     }
     finish_simple(g, t, u, class, &st);
+}
 
 #[inline(always)]
 fn class_of(tv: u16, bits: u32) -> u32 {
@@ -82,6 +87,7 @@ fn class_of(tv: u16, bits: u32) -> u32 {
     } else {
         0
     }
+}
 
 #[inline(always)]
 unsafe fn finish_simple(g: &G, t: &mut TState, u: u32, class: u32, st: &crate::core::St) {
@@ -100,6 +106,7 @@ unsafe fn finish_simple(g: &G, t: &mut TState, u: u32, class: u32, st: &crate::c
     }
     let cks: &[u64] = if allin { csr } else { &t.ck };
     t.core.finish(g, st, cks, Name::Simple(u, class));
+}
 
 #[inline(always)]
 unsafe fn claim(g: &G, u: u32) {
@@ -108,16 +115,19 @@ unsafe fn claim(g: &G, u: u32) {
     if word.fetch_or(bit, Ordering::Relaxed) & bit != 0 {
         fallback("a user has two runs");
     }
+}
 
 #[inline(always)]
 unsafe fn claim_word(g: &G, word: usize, bits: u64) {
     if bits != 0 && (*g.claim.add(word)).fetch_or(bits, Ordering::Relaxed) & bits != 0 {
         fallback("a user has two runs");
     }
+}
 
 struct Pool {
     next: AtomicUsize,
     end: usize,
+}
 use std::sync::atomic::AtomicUsize;
 impl Pool {
     fn new(g: &G) -> Pool {
@@ -142,9 +152,11 @@ impl Pool {
     fn left(&self) -> usize {
         self.end.saturating_sub(self.next.load(Ordering::Relaxed))
     }
+}
 #[inline(always)]
 fn r4k(x: usize) -> usize {
     (x + 4095) & !4095
+}
 #[derive(Clone, Copy)]
 struct Share {
     dense: *mut u8,
@@ -153,6 +165,7 @@ struct Share {
     aggp: *mut u8,
     slab: *mut u8,
     slab_len: usize,
+}
 unsafe impl Sync for Share {}
 fn fast_sizes(nc: usize, nd: usize) -> (usize, usize) {
     let n = BSIZE + GUARD + 64;
@@ -160,9 +173,11 @@ fn fast_sizes(nc: usize, nd: usize) -> (usize, usize) {
     let dense = r64(16 * (BSIZE + 16)) + r64(8 * n) + 8 * r64(4 * n);
     let hot = r64(2 * (BSIZE / 8 + 2)) + 2 * r64(BSIZE / 8 + 8) + r64(4 * (BSIZE / 16 + 2)) + r64(2 * (BSIZE / 16 + 2)) + r64(4 * (BSIZE / 16 + 2)) + r64(2 * (BSIZE / 16 + 2)) + r64(8 * (CBOUND + 2)) + r64(64 * (nc + 2)) + r64(4 * (nc + 2) * nd) + r64(256 * RC_N) + 2 * r64(4 * (WL_CAP + WL_RUN + 64)) + r64(4 * (AL_CAP + 64));
     (dense, hot)
+}
 fn slab_rows(len: usize) -> (usize, usize) {
     let r = len.saturating_sub(8 * 4096 + 4096) * 5 / 131;
     (r, r * 2 / 5)
+}
 unsafe fn slab_cols(core: &mut crate::core::Core, slab: *mut u8, len: usize) {
     let (r, p) = slab_rows(len);
     if slab.is_null() || r < 4096 {
@@ -185,6 +200,7 @@ unsafe fn slab_cols(core: &mut crate::core::Core, slab: *mut u8, len: usize) {
     if at as usize > slab as usize + len {
         fallback("slab layout");
     }
+}
 fn slab_full(core: &mut crate::core::Core) {
     core.keys.slab_full();
     core.day.slab_full();
@@ -194,6 +210,7 @@ fn slab_full(core: &mut crate::core::Core) {
     core.cat.slab_full();
     core.names.slab_full();
     core.names_off.slab_full();
+}
 fn slab_settle(core: &mut crate::core::Core) {
     let tight = |len: usize, cap: usize| cap - len.min(cap) < len / 64 + 4096;
     if core.day.in_slab() && tight(core.day.len(), core.day.cap()) {
@@ -211,6 +228,7 @@ fn slab_settle(core: &mut crate::core::Core) {
     if core.names_off.in_slab() && tight(core.names_off.len(), core.names_off.cap()) {
         core.names_off.grow(core.names_off.len());
     }
+}
 
 #[inline(always)]
 unsafe fn scatter_chunk(p: *const Rec, n: usize, slots: *mut Rec, gen: u64, nextc: *const i8) {
@@ -242,6 +260,7 @@ unsafe fn scatter_chunk(p: *const Rec, n: usize, slots: *mut Rec, gen: u64, next
         put(p.add(i));
         i += 1;
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -251,6 +270,7 @@ unsafe fn put_dup(e: *const u8, s: *mut Rec, x: __m128i) {
     if ((q >> 16) & ING_MAX) < ((old >> 16) & ING_MAX) {
         _mm_storeu_si128(s as *mut __m128i, x);
     }
+}
 
 #[inline(always)]
 unsafe fn scatter_chunk12(p: *const u8, n: usize, slots: *mut Rec, gen: u64, nextc: *const i8) {
@@ -337,6 +357,7 @@ unsafe fn scatter_chunk12(p: *const u8, n: usize, slots: *mut Rec, gen: u64, nex
         put1(p.add(12 * i));
         i += 1;
     }
+}
 const DEC2: bool = crate::env_u32(option_env!("XL_DEC2"), 1) == 1;
 
 #[inline(always)]
@@ -374,6 +395,7 @@ unsafe fn for_kept(slots: *const Rec, blkk: *const u16, keepm: *const u8, a: usi
         }
         m = *keepm.add(blk) as u32;
     }
+}
 
 #[inline(never)]
 unsafe fn edge_copy_k(tid: usize, u: u32, fx: &mut Fast, a: usize, n: usize) -> Seg {
@@ -427,6 +449,7 @@ unsafe fn edge_copy_k(tid: usize, u: u32, fx: &mut Fast, a: usize, n: usize) -> 
         fallback("kept records");
     }
     seg
+}
 
 #[cold]
 #[inline(never)]
@@ -438,6 +461,7 @@ unsafe fn odd_records(t: &mut TState, slots: *const Rec, blk: usize, odd: u8) {
         t.cx_raw.push(Rec { w0: r.w0, w1: ODDU | user_of(&r) as u64 });
         t.n_odd += 1;
     }
+}
 
 const DIG: u32 = 1 << 31;
 static DIG_MIN: AtomicUsize = AtomicUsize::new(4096);
@@ -449,12 +473,14 @@ struct DigRun {
     e: usize,
     s0: usize,
     s1: usize,
+}
 
 struct Edge {
     pieces: Vec<*mut u64>,
     used: usize,
     spare: usize,
     pool: *const Pool,
+}
 const EP_BYTES: usize = 8 * EP_WORDS + 4096;
 const EP_WORDS: usize = 1 << 16;
 const _: () = assert!(BSIZE <= EP_WORDS);
@@ -503,6 +529,7 @@ impl Edge {
         }
         self.used = 0;
     }
+}
 #[inline(always)]
 unsafe fn seg_words(s: &Seg, n: usize) -> &'static [u64] {
     if s.tid >= 64 {
@@ -514,12 +541,14 @@ unsafe fn seg_words(s: &Seg, n: usize) -> &'static [u64] {
         fallback("edge segment");
     }
     std::slice::from_raw_parts(e.pieces[pi].add(at), n)
+}
 #[inline(always)]
 unsafe fn seg_w0(s: &Seg) -> &'static [u64] {
     if s.len & DIG != 0 {
         fallback("edge segment");
     }
     seg_words(s, s.len as usize)
+}
 
 #[inline(never)]
 unsafe fn digest_put(tid: usize, fx: &mut Fast, d: &DigRun, q: *const u64, sidx: *const u32, sts: *const u32, np: usize) -> Seg {
@@ -561,6 +590,7 @@ unsafe fn digest_put(tid: usize, fx: &mut Fast, d: &DigRun, q: *const u64, sidx:
         *p.add(3 + 2 * ns + (j - pa)) = ((*ps.add(j) as usize - d.s0) as u64) << 32 | *pw.add(j) as u64;
     }
     seg
+}
 #[inline(always)]
 unsafe fn digest_get(s: &Seg) -> (&'static [u64], &'static [u64], u64, u32, u64, u64) {
     let w = seg_words(s, (s.len & !DIG) as usize);
@@ -572,6 +602,7 @@ unsafe fn digest_get(s: &Seg) -> (&'static [u64], &'static [u64], u64, u32, u64,
         fallback("edge segment");
     }
     (&w[3..3 + 2 * ns], &w[3 + 2 * ns..], w[1] & 0xFFFF_FFFF, (w[1] >> 32) as u32, w[2] >> 32, w[2] & 0xFFFF_FFFF)
+}
 
 #[inline(always)]
 unsafe fn edge_copy(e: *mut Edge, tid: usize, u: u32, recs: &[Rec]) -> Seg {
@@ -580,6 +611,7 @@ unsafe fn edge_copy(e: *mut Edge, tid: usize, u: u32, recs: &[Rec]) -> Seg {
         *p.add(i) = r.w0;
     }
     seg
+}
 
 fn stage3a_old(g: &G, tid: usize) {
     let t = g.t(tid);
@@ -690,6 +722,7 @@ fn stage3a_old(g: &G, tid: usize) {
             t.prof[2] += (td - tc).as_nanos() as u64;
         }
     }
+}
 
 
 use std::arch::x86_64::*;
@@ -725,6 +758,7 @@ fn thread_ru() -> [u64; 4] {
     let mut ru = [0i64; 18];
     unsafe { getrusage(1, &mut ru) };
     [(ru[0] * 1_000_000 + ru[1]) as u64, (ru[2] * 1_000_000 + ru[3]) as u64, ru[8] as u64, ru[9] as u64]
+}
 static XH: [std::sync::atomic::AtomicU64; 32] = unsafe { std::mem::transmute([0u64; 32]) };
 static XCNT: [std::sync::atomic::AtomicU64; 32] = unsafe { std::mem::transmute([0u64; 32]) };
 #[inline(always)]
@@ -732,11 +766,13 @@ fn xc(i: usize, v: u64) {
     if XD {
         XCNT[i].fetch_add(v, Ordering::Relaxed);
     }
+}
 static XACC: [[std::sync::atomic::AtomicU64; NEVT + 1]; NPH] = unsafe { std::mem::transmute([[0u64; NEVT + 1]; NPH]) };
 extern "C" {
     fn syscall(n: i64, ...) -> i64;
     fn read(fd: i32, buf: *mut std::ffi::c_void, n: usize) -> isize;
     fn getrusage(who: i32, ru: *mut [i64; 18]) -> i32;
+}
 struct Xp {
     fd: i32,
     nev: usize,
@@ -746,6 +782,7 @@ struct Xp {
     t: std::time::Instant,
     last: [u64; NEVT],
     acc: [[u64; NEVT + 1]; NPH],
+}
 impl Xp {
     fn new() -> Xp {
         let mut x = Xp { fd: -1, nev: 0, ru0: if XP || XR { thread_ru() } else { [0; 4] }, flt: if XP { thread_ru()[2] } else { 0 }, facc: [0; NPH], t: std::time::Instant::now(), last: [0; NEVT], acc: [[0; NEVT + 1]; NPH] };
@@ -819,6 +856,7 @@ impl Xp {
             }
         }
     }
+}
 fn xp_report(nev: u64) {
     if XR {
         eprintln!("XRU stage 3a threads: user {:.1} ms, system {:.1} ms, minor faults {}", XRU[0].load(Ordering::Relaxed) as f64 / 1e3, XRU[1].load(Ordering::Relaxed) as f64 / 1e3, XRU[2].load(Ordering::Relaxed));
@@ -842,6 +880,7 @@ fn xp_report(nev: u64) {
         let f = |i: usize| v[i] as f64 / nev as f64;
         eprintln!("XPROF {:8} {:7.1} | {:7.2} {:7.2} {:7.2} {:7.4} {:7.4} {:7.4} | faults {}", if p < NPH { PH_NAMES[p] } else { "TOTAL" }, v[0] as f64 / 1e6, f(1), f(2), f(3), f(4), f(5), f(6), if p < NPH { XFLT[p].load(Ordering::Relaxed) } else { 0 });
     }
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -871,6 +910,7 @@ pub fn fast_name(ukey: u64, u: u32, class: u32) -> (u64, usize) {
     let p = |v: u32| crate::PAIR36[v as usize] as u64;
     let le = p(hi / 1296) | p(hi % 1296) << 16 | p(lo / 1296) << 32 | p(lo % 1296) << 48;
     (le.swap_bytes() & (u64::MAX << (8 * (8 - len))), len)
+}
 
 #[inline(always)]
 fn name_key_scalar(ukey: u64, u: u32, class: u32) -> u64 {
@@ -885,6 +925,7 @@ fn name_key_scalar(ukey: u64, u: u32, class: u32) -> u64 {
         best = best.min(key);
     }
     best
+}
 
 #[inline(always)]
 fn key_chars(best: u64) -> (u64, usize) {
@@ -894,6 +935,7 @@ fn key_chars(best: u64) -> (u64, usize) {
     let p = |v: u32| unsafe { *crate::PAIR36.get_unchecked(v as usize) } as u64;
     let le = p(hi / 1296) | p(hi % 1296) << 16 | p(lo / 1296) << 32 | p(lo % 1296) << 48;
     (le.swap_bytes() & (u64::MAX << (8 * (8 - len))), len)
+}
 
 const NAME_C: f64 = (1.0 / 1_679_616.0) * (1.0 - 1.0 / 1_099_511_627_776.0);
 
@@ -920,10 +962,12 @@ unsafe fn key_chars4(best: __m256i) -> __m256i {
     let ch = _mm256_add_epi8(_mm256_add_epi8(dg, _mm256_set1_epi8(48)), _mm256_and_si256(_mm256_cmpgt_epi8(dg, _mm256_set1_epi8(9)), _mm256_set1_epi8(39)));
     let sh = _mm256_sub_epi64(_mm256_set1_epi64x(64), _mm256_slli_epi64::<3>(len));
     _mm256_and_si256(ch, _mm256_srlv_epi64(_mm256_set1_epi64x(-1), sh))
+}
 
 #[inline(always)]
 unsafe fn name_key4(ukey: u64, u: u32, al: __m256i) -> __m256i {
     name_key4v(ukey, _mm256_or_si256(_mm256_set1_epi64x(((u as u64) << 9) as i64), al))
+}
 
 #[inline(always)]
 unsafe fn name_key4v(ukey: u64, v: __m256i) -> __m256i {
@@ -941,6 +985,7 @@ unsafe fn name_key4v(ukey: u64, v: __m256i) -> __m256i {
     let len = _mm256_mask_add_epi64(g, _mm256_cmpge_epu64_mask(y, p), g, one);
     let fac = _mm512_castsi512_si256(_mm512_permutexvar_epi64(_mm512_zextsi256_si512(_mm256_sub_epi64(_mm256_set1_epi64x(8), len)), pow_b));
     _mm256_or_si256(_mm256_slli_epi64(_mm256_mullo_epi64(y, fac), 4), len)
+}
 
 #[inline(always)]
 unsafe fn min4(k: __m256i, n: u32) -> u64 {
@@ -948,6 +993,7 @@ unsafe fn min4(k: __m256i, n: u32) -> u64 {
     let a = _mm256_min_epu64(k, _mm256_permute4x64_epi64::<0b01_00_11_10>(k));
     let b = _mm256_min_epu64(a, _mm256_permute4x64_epi64::<0b00_00_00_01>(a));
     _mm256_extract_epi64::<0>(b) as u64
+}
 
 #[inline(always)]
 pub unsafe fn fast_name_y(ukey: u64, u: u32, class: u32) -> (u64, usize) {
@@ -962,6 +1008,7 @@ pub unsafe fn fast_name_y(ukey: u64, u: u32, class: u32) -> (u64, usize) {
         best = best.min(min4(name_key4(ukey, u, _mm256_cvtepu32_epi64(_mm512_extracti32x4_epi32::<1>(al))), n - 4));
     }
     key_chars(best)
+}
 
 #[inline(always)]
 pub unsafe fn fast_name_v(ukey: u64, u: u32, class: u32) -> (u64, usize) {
@@ -993,6 +1040,7 @@ pub unsafe fn fast_name_v(ukey: u64, u: u32, class: u32) -> (u64, usize) {
     let p = |v: u32| crate::PAIR36[v as usize] as u64;
     let le = p(hi / 1296) | p(hi % 1296) << 16 | p(lo / 1296) << 32 | p(lo % 1296) << 48;
     (le.swap_bytes() & (u64::MAX << (8 * (8 - len))), len)
+}
 
 fn name_selftest(g: &G) {
     use crate::keyrec::{unshuffle, A, MASK as M40};
@@ -1067,10 +1115,12 @@ fn name_selftest(g: &G) {
             unsafe { crate::sys::_exit(5) }
         }
     }
+}
 
 const FN_: usize = BSIZE + GUARD + 64;
 const fn r64c(x: usize) -> usize {
     (x + 63) & !63
+}
 const OQ_SIDX: usize = r64c(8 * FN_);
 const OQ_STS: usize = OQ_SIDX + r64c(4 * FN_);
 const OQ_SDAY: usize = OQ_STS + r64c(4 * FN_) + 4 * GUARD;
@@ -1107,11 +1157,13 @@ const OP_W: usize = OP_ROW + r64c(4 * BSIZE);
 #[inline(always)]
 unsafe fn at<T>(base: *const u8, off: usize) -> *mut T {
     base.add(off) as *mut T
+}
 #[inline(always)]
 fn opaque(p: *const u8) -> *const u8 {
     let mut p = p;
     unsafe { std::arch::asm!("/* {0} */", inout(reg) p, options(pure, nomem, nostack, preserves_flags)) };
     p
+}
 
 struct Fast {
     slots: *mut Rec,
@@ -1160,6 +1212,7 @@ struct Fast {
     cl_r: *mut u32,
     cl_a: *mut u32,
     cl_n: *mut u32,
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -1169,6 +1222,7 @@ struct Rc {
     conf: [u32; 16],
     vm: u32,
     pad: [u32; 15],
+}
 const RC_N: usize = 128;
 const WL_CAP: usize = 4096;
 const WL_RUN: usize = 1024;
@@ -1206,6 +1260,7 @@ unsafe fn light_flush(fx: &mut Fast, nw: usize, org: u32) {
         }
     }
     count_cells(af, list, nl, dummy);
+}
 
 #[inline(always)]
 unsafe fn count_cells(af: *mut u32, list: *mut u32, nl: usize, dummy: u32) {
@@ -1218,6 +1273,7 @@ unsafe fn count_cells(af: *mut u32, list: *mut u32, nl: usize, dummy: u32) {
         add1(af, *list.add(j + 3));
         j += 4;
     }
+}
 
 #[inline(never)]
 unsafe fn cred_count(cred: *mut u8, scamp: *const u32, sday: *const u32, ns: usize, nd: usize) {
@@ -1240,14 +1296,17 @@ unsafe fn cred_count(cred: *mut u8, scamp: *const u32, sday: *const u32, ns: usi
         }
         s += 8;
     }
+}
 
 #[inline(always)]
 unsafe fn add1(base: *mut u32, i: u32) {
     std::arch::asm!("add dword ptr [{b} + 4*{i}], 1", b = in(reg) base, i = in(reg) i as usize, options(nostack));
+}
 
 #[inline(always)]
 unsafe fn add1b(base: *mut u8, off: u32) {
     std::arch::asm!("add dword ptr [{b} + {o}], 1", b = in(reg) base, o = in(reg) off as usize, options(nostack));
+}
 impl Fast {
     fn new(nc: usize, nd: usize, sh: &Share) -> Fast {
         let n = BSIZE + GUARD + 64;
@@ -1341,6 +1400,7 @@ impl Fast {
             fx
         }
     }
+}
 
 #[inline(never)]
 unsafe fn flush_names(fx: &Fast, core: &mut crate::core::Core, ukey: u64, row_cap: usize, np: &mut usize, na: &mut usize) {
@@ -1382,18 +1442,21 @@ unsafe fn flush_names(fx: &Fast, core: &mut crate::core::Core, ukey: u64, row_ca
     core.names.truncate(nl);
     *np = 0;
     *na = 0;
+}
 
 #[inline(always)]
 unsafe fn bcast_hi(p: *const u64) -> __m512i {
     let v: __m512i;
     std::arch::asm!("vpbroadcastd {v}, dword ptr [{p} + 4]", v = lateout(zmm_reg) v, p = in(reg) p, options(pure, readonly, nostack, preserves_flags));
     v
+}
 
 #[inline(always)]
 unsafe fn cmp_mask<const P: i32>(a: __m512i, b: __m512i) -> u32 {
     let r: u32;
     std::arch::asm!("vpcmpud {k}, {a}, {b}, {p}", "kmovw {r:e}, {k}", k = out(kreg) _, a = in(zmm_reg) a, b = in(zmm_reg) b, p = const P, r = lateout(reg) r, options(pure, nomem, nostack, preserves_flags));
     r
+}
 
 #[inline(never)]
 unsafe fn run_clicks(fx: &mut Fast, cks: &[u64], class: u32, s0: usize, nsr: usize, org: u32) {
@@ -1419,6 +1482,7 @@ unsafe fn run_clicks(fx: &mut Fast, cks: &[u64], class: u32, s0: usize, nsr: usi
     } else {
         run_clicks_k::<false>(fx, cks, class, s0, nsr, org)
     }
+}
 
 #[inline(always)]
 unsafe fn run_clicks_k<const ALL: bool>(fx: &mut Fast, cks: &[u64], class: u32, s0: usize, nsr: usize, org: u32) {
@@ -1520,12 +1584,14 @@ unsafe fn run_clicks_k<const ALL: bool>(fx: &mut Fast, cks: &[u64], class: u32, 
     }
     _mm512_storeu_si512(sc.wrapping_add(to) as *mut _, orgv);
     _mm512_storeu_si512(sts0.add(nsr) as *mut _, saved);
+}
 
 #[inline(always)]
 unsafe fn mul32_256(a: __m256i, b: __m256i) -> __m256i {
     let o: __m256i;
     std::arch::asm!("vpmuludq {o}, {a}, {b}", o = lateout(ymm_reg) o, a = in(ymm_reg) a, b = in(ymm_reg) b, options(pure, nomem, nostack, preserves_flags));
     o
+}
 
 #[inline(never)]
 unsafe fn pass_b(q: *const u64, k: usize, utab: *const u16, blkk: *const u16, mix: &mut Vec<u32>) -> usize {
@@ -1544,6 +1610,7 @@ unsafe fn pass_b(q: *const u64, k: usize, utab: *const u16, blkk: *const u16, mi
     *mp.add(st.nmix) = u32::MAX;
     mix.set_len(st.nmix + 1);
     st.ns
+}
 
 struct PassB {
     tlast: __m512i,
@@ -1552,6 +1619,7 @@ struct PassB {
     cur: u32,
     ns: usize,
     nmix: usize,
+}
 
 #[inline(always)]
 unsafe fn pass_b_step(st: &mut PassB, q: *const u64, i: usize, tail: u32, utab: *const u16, bb: *const u8, mix: *mut u32) {
@@ -1613,6 +1681,7 @@ unsafe fn pass_b_step(st: &mut PassB, q: *const u64, i: usize, tail: u32, utab: 
     *blk_ns.add(i >> 4) = ns as u32;
     *ssb.add(i >> 4) = ss as u16;
     st.ns = ns + ss.count_ones() as usize;
+}
 
 #[inline(never)]
 unsafe fn purch_scan(q: *const u64, blkk: *const u16, pl: *const u16, aggp: *const [u64; 2], nd: usize, np: usize) {
@@ -1635,6 +1704,7 @@ unsafe fn purch_scan(q: *const u64, blkk: *const u16, pl: *const u16, aggp: *con
         *pr.add(j) = row;
         *pw.add(j) = ((wv >> 4) & 0x1FFF_FFFF) as u32;
     }
+}
 
 #[inline(never)]
 unsafe fn purch_add(q: *const u64, pl: *const u16, aggp: *mut [u64; 2], np: usize) {
@@ -1665,6 +1735,7 @@ unsafe fn purch_add(q: *const u64, pl: *const u16, aggp: *mut [u64; 2], np: usiz
         *row_rev.add(row as usize) = rv.min(0x8000_0000) as u32;
         *row_cat.add(row as usize) = (31 - (best & 31)) as u8;
     }
+}
 
 struct Walk {
     cw: usize,
@@ -1677,6 +1748,7 @@ struct Walk {
     c_runs: u64,
     c_simple: u64,
     c_sess: u64,
+}
 
 #[inline(never)]
 unsafe fn walk_runs(fx: &mut Fast, g: &G, wk: &mut Walk, xp: &mut Xp, r0: usize, nrun: usize, pidx0: u32, org: u32) -> usize {
@@ -1854,6 +1926,7 @@ unsafe fn walk_runs(fx: &mut Fast, g: &G, wk: &mut Walk, xp: &mut Xp, r0: usize,
     wk.nw = nw;
     wk.nrc = nrc;
     r1
+}
 
 fn stage3a(g: &G, tid: usize, pool: &Pool, sh: &Share) {
     let t = g.t(tid);
@@ -2253,6 +2326,7 @@ fn stage3a(g: &G, tid: usize, pool: &Pool, sh: &Share) {
             }
         }
     }
+}
 
 fn stage3b(g: &G, tid: usize) {
     let t = g.t(tid);
@@ -2350,6 +2424,7 @@ fn stage3b(g: &G, tid: usize) {
     if !released {
         g.ev_arena.release_part(tid, g.nt);
     }
+}
 
 fn shares(g: &G, pool: &Pool, old: bool) -> Vec<Share> {
     let none = Share { dense: std::ptr::null_mut(), hot: std::ptr::null_mut(), agg: std::ptr::null_mut(), aggp: std::ptr::null_mut(), slab: std::ptr::null_mut(), slab_len: 0 };
@@ -2376,6 +2451,7 @@ fn shares(g: &G, pool: &Pool, old: bool) -> Vec<Share> {
         }
     }
     v
+}
 const SLAB_ROWS: usize = crate::env_u32(option_env!("XL_SLABROWS"), 13) as usize;
 const CXR_DIV: usize = crate::env_u32(option_env!("XL_CXRDIV"), 64) as usize;
 
@@ -2453,3 +2529,4 @@ pub fn stage3(g: &mut G) {
         }
     }
     crate::core::COLS_PINNED.store(true, Ordering::Relaxed);
+}

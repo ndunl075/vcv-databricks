@@ -1,26 +1,37 @@
 #![allow(dead_code, static_mut_refs, unused_unsafe, unexpected_cfgs)]
+#[cfg(target_feature = "avx512f")]
 #[path = "indexing/column_index.rs"]
 mod ckix;
+#[cfg(target_feature = "avx512f")]
 #[path = "records/complex_value.rs"]
 mod complex;
+#[cfg(target_feature = "avx512f")]
 #[path = "records/model.rs"]
 mod core;
+#[cfg(target_feature = "avx512f")]
 #[path = "ingest/events.rs"]
 mod events;
+#[cfg(target_feature = "avx512f")]
 #[path = "runtime/interface.rs"]
 mod iface;
+#[cfg(target_feature = "avx512f")]
 #[path = "keys/reference.rs"]
 mod k_ref;
+#[cfg(target_feature = "avx512f")]
 #[path = "keys/record.rs"]
 mod keyrec;
+#[cfg(target_feature = "avx512f")]
 #[path = "ingest/links.rs"]
 mod links;
+#[cfg(target_feature = "avx512f")]
 #[path = "output/writer.rs"]
 mod out;
+#[cfg(target_feature = "avx512f")]
 #[path = "ingest/parser.rs"]
 mod parse;
 #[path = "runtime/work_queue.rs"]
 mod pqw;
+#[cfg(target_feature = "avx512f")]
 #[path = "runtime/bootstrap.rs"]
 mod setup;
 #[path = "runtime/system.rs"]
@@ -34,8 +45,10 @@ use sys::*;
 static ALLOC: sys::Alloc = sys::Alloc;
 
 mod generic;
+#[cfg(target_feature = "avx512f")]
 #[path = "keys/free.rs"]
 mod k_free;
+#[cfg(target_feature = "avx512f")]
 pub type K = k_free::Free;
 
 fn dirs(args: &[String], skip: usize) -> (String, String) {
@@ -44,9 +57,11 @@ fn dirs(args: &[String], skip: usize) -> (String, String) {
     } else {
         (std::env::var("DATA_DIR").unwrap_or_else(|_| "/data".into()), std::env::var("OUTPUT_DIR").unwrap_or_else(|_| "/output".into()))
     }
+}
 
 pub fn ncpu_env() -> usize {
     std::env::var("NCPU").ok().and_then(|s| s.trim().parse().ok()).filter(|&n| n > 0).unwrap_or(8)
+}
 
 pub fn run_generic(data: &str, out: &str, ncpu: usize) -> ! {
     match generic::run(std::path::Path::new(data), std::path::Path::new(out), ncpu) {
@@ -56,6 +71,7 @@ pub fn run_generic(data: &str, out: &str, ncpu: usize) -> ! {
             unsafe { sys::_exit(1) }
         }
     }
+}
 
 pub const fn env_u32(s: Option<&str>, d: u32) -> u32 {
     match s {
@@ -70,6 +86,7 @@ pub const fn env_u32(s: Option<&str>, d: u32) -> u32 {
             v
         }
     }
+}
 pub const BB: u32 = env_u32(option_env!("XL_BB"), 15);
 pub const SPIN_US_DEFAULT: u64 = env_u32(option_env!("XL_SPIN_DEF"), 400) as u64;
 pub const BSIZE: usize = 1 << BB;
@@ -97,6 +114,7 @@ pub const TAG_ODDC: u64 = 2 << 62;
 pub struct Rec {
     pub w0: u64,
     pub w1: u64,
+}
 
 #[derive(Clone, Copy)]
 pub struct OddEv {
@@ -104,22 +122,26 @@ pub struct OddEv {
     pub ing: i64,
     pub w0: u64,
     pub user: u64,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Ev,
     Ck,
     Lk,
+}
 pub struct FileInfo {
     pub kind: Kind,
     pub off: usize,
     pub len: usize,
     pub hdr: usize,
+}
 #[derive(Clone, Copy)]
 pub struct Chunk {
     pub file: u32,
     pub a: usize,
     pub b: usize,
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct Seg {
@@ -127,12 +149,15 @@ pub struct Seg {
     pub off: u32,
     pub len: u32,
     pub user: u32,
+}
 #[derive(Clone, Copy, Default)]
 pub struct EdgeInfo {
     pub n: u32,
     pub first: Seg,
     pub last: Seg,
+}
 
+#[cfg(target_feature = "avx512f")]
 pub struct TState {
     pub ev: parse::EvPart,
     pub us: parse::Part,
@@ -163,7 +188,9 @@ pub struct TState {
     pub n_odd: u64,
     pub n_runs: u64,
     pub prof: [u64; 8],
+}
 
+#[cfg(target_feature = "avx512f")]
 pub struct G {
     pub nt: usize,
     pub check: bool,
@@ -213,7 +240,10 @@ pub struct G {
     pub odd_kept: Vec<OddEv>,
     pub next: AtomicUsize,
     pub st2b_done: std::sync::atomic::AtomicBool,
+}
+#[cfg(target_feature = "avx512f")]
 unsafe impl Sync for G {}
+#[cfg(target_feature = "avx512f")]
 impl G {
     #[inline(always)]
     #[allow(clippy::mut_from_ref)]
@@ -258,6 +288,7 @@ impl G {
             std::slice::from_raw_parts((self.csr as *const u64).add(a), b - a)
         }
     }
+}
 
 static PAIR36: [u16; 1296] = {
     let mut t = [0u16; 1296];
@@ -280,11 +311,48 @@ pub fn enc36(y: u64) -> (u64, usize) {
     let z = be ^ 0x3030_3030_3030_3030;
     let lz = if z == 0 { 7 } else { (z.leading_zeros() / 8) as usize };
     (be << (8 * lz), 8 - lz)
+}
 
 #[inline(always)]
 pub fn shard(pkey: u64) -> usize {
     (pkey.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58) as usize
+}
 
+/// Portable build (no AVX-512 at compile time). Runs the AVX-512 build when this CPU has
+/// every feature it was compiled for; otherwise runs the generic path in this process.
+#[cfg(not(target_feature = "avx512f"))]
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let generic = args.get(1).map(|s| s.as_str()) == Some("--generic");
+    if !generic && fast_cpu_ok() && std::env::var("XL_FORCE_GENERIC").map_or(true, |v| v != "1") {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(FAST_EXE).args(&args[1..]).exec();
+        eprintln!("[dispatch] could not start {FAST_EXE}: {err}; using the generic path");
+    } else if !generic {
+        eprintln!("[dispatch] CPU lacks the AVX-512 build's features; using the generic path");
+    }
+    let (data, outdir) = dirs(&args, if generic { 1 } else { 0 });
+    run_generic(&data, &outdir, ncpu_env());
+}
+
+/// Path of the AVX-512 (target-cpu=cascadelake) build inside the image.
+#[cfg(not(target_feature = "avx512f"))]
+const FAST_EXE: &str = "/pipeline-avx512";
+
+/// True when the CPU (and OS) support every target feature the cascadelake build enables.
+#[cfg(not(target_feature = "avx512f"))]
+fn fast_cpu_ok() -> bool {
+    macro_rules! all {
+        ($($f:tt),*) => { true $(&& std::arch::is_x86_feature_detected!($f))* };
+    }
+    all!(
+        "adx", "aes", "avx", "avx2", "avx512bw", "avx512cd", "avx512dq", "avx512f", "avx512vl", "avx512vnni",
+        "bmi1", "bmi2", "cmpxchg16b", "f16c", "fma", "fxsr", "lzcnt", "movbe", "pclmulqdq", "popcnt",
+        "rdrand", "rdseed", "sse", "sse2", "sse3", "sse4.1", "sse4.2", "ssse3", "xsave", "xsavec", "xsaveopt", "xsaves"
+    )
+}
+
+#[cfg(target_feature = "avx512f")]
 fn main() {
     sys::xm(1);
     let t0 = Instant::now();
@@ -580,3 +648,4 @@ fn main() {
     }
     sys::xm_end();
     unsafe { sys::_exit(0) }
+}

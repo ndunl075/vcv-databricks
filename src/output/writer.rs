@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 fn die(what: &str) -> ! {
     eprintln!("[v2b] write error: {what}");
     unsafe { sys::_exit(1) }
+}
 
 #[derive(Clone, Copy)]
 struct View {
@@ -20,6 +21,7 @@ struct View {
     noff: *const u32,
     nnoff: usize,
     rows: usize,
+}
 unsafe impl Send for View {}
 unsafe impl Sync for View {}
 fn view(c: &crate::core::Core) -> View {
@@ -36,9 +38,11 @@ fn view(c: &crate::core::Core) -> View {
         nnoff: c.names_off.len(),
         rows: c.day.len(),
     }
+}
 
 fn write_piece(g: &G, t: usize, a: usize, b: usize, path: &Path, cats_off: &[u32], cats_data: &[u8], kbuf: &mut Vec<u32>) {
     write_rows(&view(&g.t(t).core), a, b, path, cats_off, cats_data, kbuf)
+}
 
 #[derive(Default)]
 struct Split {
@@ -50,11 +54,13 @@ struct Split {
     c: Vec<u8>,
     b: Vec<u8>,
     t: Vec<u32>,
+}
 
 const STRIDE: usize = SUB_ROWS + SUB_ROWS / 2 + 16 + crate::env_u32(option_env!("XL_SPAD_DEF"), 0) as usize;
 thread_local! {
     static SPLIT: std::cell::RefCell<Split> = std::cell::RefCell::new(Split::default());
     static UFILE: std::cell::RefCell<Option<UserFile>> = const { std::cell::RefCell::new(None) };
+}
 
 fn end_user_file() {
     if let Some(f) = UFILE.with(|f| f.borrow_mut().take()) {
@@ -62,18 +68,21 @@ fn end_user_file() {
             die("user_daily");
         }
     }
+}
 
 const UF_LIMIT: usize = (crate::env_u32(option_env!("XL_UFL_DEF"), 1024) as usize) << 10;
 
 const S3_LIMIT: usize = (crate::env_u32(option_env!("XL_S3L_DEF"), 192) as usize) << 10;
 thread_local! {
     static S3_SMALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 const S3_MIN: usize = crate::env_u32(option_env!("XL_S3MIN_DEF"), SUB_ROWS as u32) as usize;
 struct S3Ctx {
     ud: std::path::PathBuf,
     cd: std::path::PathBuf,
     cats_off: Vec<u32>,
     cats_data: Vec<u8>,
+}
 static S3CTX: std::sync::OnceLock<S3Ctx> = std::sync::OnceLock::new();
 static S3PREP: std::sync::Once = std::sync::Once::new();
 struct S3Slots([std::cell::UnsafeCell<Option<UserFile>>; 16]);
@@ -88,6 +97,7 @@ fn ctx_new(g: &G, outdir: &str) -> S3Ctx {
         cats_off.push(cats_data.len() as u32);
     }
     S3Ctx { ud: Path::new(outdir).join("user_daily"), cd: Path::new(outdir).join("campaign_daily"), cats_off, cats_data }
+}
 
 pub fn s3_init(g: &G, outdir: &str) {
     if std::env::var("XL_S3").is_ok_and(|v| v == "0") {
@@ -98,6 +108,7 @@ pub fn s3_init(g: &G, outdir: &str) {
     S3_UPTO.store(g.nb * f / 100, Ordering::Relaxed);
     #[cfg(feature = "tl")]
     crate::pqw::prof::ON.store(std::env::var("XL_WPROF").is_ok_and(|v| v == "1"), Ordering::Relaxed);
+}
 
 fn s3_prep(c: &S3Ctx) {
     S3PREP.call_once(|| {
@@ -107,12 +118,14 @@ fn s3_prep(c: &S3Ctx) {
         clear_stale(&c.ud);
         clear_stale(&c.cd);
     });
+}
 
 #[inline(always)]
 pub fn s3_bucket(g: &G, tid: usize, c: &mut crate::core::Core) {
     if c.day.len() >= c.s3w + S3_MIN && g.next.load(Ordering::Relaxed) < S3_UPTO.load(Ordering::Relaxed) {
         s3_write(tid, c);
     }
+}
 static S3_UPTO: AtomicUsize = AtomicUsize::new(0);
 const S3F_DEF: u32 = crate::env_u32(option_env!("XL_S3F_DEF"), 65);
 
@@ -136,6 +149,7 @@ fn s3_write(tid: usize, c: &mut crate::core::Core) {
     S3_SMALL.with(|c| c.set(false));
     crate::pqw::prof::sw(_p0);
     c.s3w = b;
+}
 
 const SPLIT_ROWS: bool = crate::env_u32(option_env!("XL_SPLIT_DEF"), 1) != 0;
 
@@ -188,6 +202,7 @@ unsafe fn split_rows(keys: *mut u32, day: *mut i32, ses: *mut i32, evs: *mut i32
         i += 1;
     }
     (iz, ip)
+}
 
 
 const PERM: [u64; 256] = {
@@ -329,6 +344,7 @@ unsafe fn split_rev(keys: *const u32, day: *const i32, ses: *const i32, evs: *co
     }
     st.m = m;
     (iz, ip, st)
+}
 
 const SREV: bool = crate::env_u32(option_env!("XL_SREV_DEF"), 1) != 0;
 
@@ -427,6 +443,7 @@ unsafe fn split_perm(keys: *mut u32, day: *mut i32, ses: *mut i32, evs: *mut i32
     }
     st.m = m;
     (iz, ip, st)
+}
 
 
 
@@ -436,6 +453,7 @@ const PSPLIT: bool = crate::env_u32(option_env!("XL_PSPLIT_DEF"), 1) != 0;
 
 fn write_split(v: &View, a: usize, b: usize, path: &Path, cats_off: &[u32], cats_data: &[u8]) {
     UFILE.with(|f| write_split_to(v, a, b, path, cats_off, cats_data, &mut f.borrow_mut()))
+}
 
 fn write_split_to(v: &View, a: usize, b: usize, path: &Path, cats_off: &[u32], cats_data: &[u8], uf: &mut Option<UserFile>) {
     let mut x = a;
@@ -444,6 +462,7 @@ fn write_split_to(v: &View, a: usize, b: usize, path: &Path, cats_off: &[u32], c
         write_split_group(v, x, y, path, cats_off, cats_data, uf);
         x = y;
     }
+}
 
 const SUB_ROWS: usize = crate::env_u32(option_env!("XL_SUB_DEF"), 4096) as usize;
 
@@ -537,6 +556,7 @@ fn write_split_group(v: &View, a: usize, b: usize, path: &Path, cats_off: &[u32]
         die("user_daily");
     }
     });
+}
 
 fn write_rows(v: &View, a: usize, b: usize, path: &Path, cats_off: &[u32], cats_data: &[u8], kbuf: &mut Vec<u32>) {
     use std::slice::from_raw_parts as sl;
@@ -562,6 +582,7 @@ fn write_rows(v: &View, a: usize, b: usize, path: &Path, cats_off: &[u32], cats_
     if write_file(path, &cols, &opts, Method::Stream(1 << 20)).is_err() {
         die("user_daily");
     }
+}
 
 fn write_campaign(g: &G, dir: &Path) {
     let nd = g.nd;
@@ -656,6 +677,7 @@ fn write_campaign(g: &G, dir: &Path) {
             unsafe { sys::_exit(5) }
         }
     }
+}
 
 fn write_campaign_part(g: &G, path: &Path, lo: usize, hi: usize) -> [i64; 4] {
     let nd = g.nd;
@@ -782,6 +804,7 @@ fn write_campaign_part(g: &G, path: &Path, lo: usize, hi: usize) -> [i64; 4] {
     }
     crate::pqw::prof::sw(_pv);
     [v[0].iter().sum(), v[2].iter().sum(), v[3].iter().sum(), organic]
+}
 
 fn clear_stale(dir: &Path) {
     if let Ok(rd) = std::fs::read_dir(dir) {
@@ -791,6 +814,7 @@ fn clear_stale(dir: &Path) {
             }
         }
     }
+}
 
 pub fn stage5(g: &mut G, outdir: &str) {
     let ud = Path::new(outdir).join("user_daily");
@@ -844,6 +868,7 @@ pub fn stage5(g: &mut G, outdir: &str) {
         }
         end_user_file();
     });
+}
 
 fn cut(rows: &[(usize, usize)], np: usize) -> Vec<(usize, usize, usize)> {
     let mut base = vec![0usize; rows.len() + 1];
@@ -863,6 +888,7 @@ fn cut(rows: &[(usize, usize)], np: usize) -> Vec<(usize, usize, usize)> {
         }
     }
     v
+}
 
 const RPG: usize = crate::env_u32(option_env!("XL_RPG_DEF"), 0) as usize;
 
@@ -887,6 +913,7 @@ fn cut_guided(rows: &[(usize, usize)], nt: usize) -> Vec<(usize, usize, usize)> 
         }
     }
     v
+}
 
 pub static REGION_UNMAP: AtomicBool = AtomicBool::new(true);
 
@@ -1059,3 +1086,4 @@ pub fn stage45(g: &mut G, outdir: &str) {
             unsafe { sys::_exit(5) }
         }
     }
+}

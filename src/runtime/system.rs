@@ -11,6 +11,7 @@ extern "C" {
     pub fn _exit(code: i32) -> !;
     fn execve(path: *const c_char, argv: *const *const c_char, envp: *const *const c_char) -> i32;
     static environ: *const *const c_char;
+}
 use std::ffi::{c_char, CString};
 pub const PROT_READ: i32 = 1;
 pub const PROT_WRITE: i32 = 2;
@@ -42,6 +43,7 @@ pub fn fd_reserve() {
             FD_ALL.store(true, Ordering::Relaxed);
         }
     }
+}
 
 pub fn minflt(who: i32) -> i64 {
     extern "C" {
@@ -50,10 +52,12 @@ pub fn minflt(who: i32) -> i64 {
     let mut ru = [0i64; 18];
     unsafe { getrusage(who, &mut ru) };
     ru[8]
+}
 
 pub fn detect_pages() {
     let never = std::fs::read("/sys/kernel/mm/transparent_hugepage/enabled").map_or(false, |s| s.windows(7).any(|w| w == b"[never]"));
     SMALLPAGES.store(!HUGE.load(Ordering::Relaxed) || never, Ordering::Relaxed);
+}
 
 pub unsafe fn release(p: *const u8, bytes: usize) {
     let a = (p as usize + 4095) & !4095;
@@ -61,6 +65,7 @@ pub unsafe fn release(p: *const u8, bytes: usize) {
     if b > a {
         madvise(a as *mut u8, b - a, MADV_DONTNEED);
     }
+}
 
 #[cfg(xm)]
 pub static mut XM: [u64; 64] = [0; 64];
@@ -76,12 +81,14 @@ pub fn xt(_i: usize, _end: bool) {
             XT[2 * _i + _end as usize] = std::arch::x86_64::_rdtsc()
         }
     }
+}
 #[inline(always)]
 pub fn xm(_i: usize) {
     #[cfg(xm)]
     unsafe {
         XM[_i] = std::arch::x86_64::_rdtsc()
     }
+}
 pub fn xm_page() {
     #[cfg(xm)]
     unsafe {
@@ -90,6 +97,7 @@ pub fn xm_page() {
             XM_PAGE = p as usize;
         }
     }
+}
 #[inline(always)]
 pub fn xm_end() {
     #[cfg(xm)]
@@ -106,6 +114,7 @@ pub fn xm_end() {
             p.add(8 + 63).write_volatile(t);
         }
     }
+}
 
 pub fn exit_release(nt: usize, fds: &[i32]) {
     extern "C" {
@@ -159,6 +168,7 @@ pub fn exit_release(nt: usize, fds: &[i32]) {
     while DONE.load(Ordering::Acquire) != n && rdtsc() - t1 < bound {
         std::hint::spin_loop();
     }
+}
 
 pub unsafe fn release_heap_part(tid: usize, nt: usize) {
     let base = A_BASE.load(Ordering::Relaxed);
@@ -168,6 +178,7 @@ pub unsafe fn release_heap_part(tid: usize, nt: usize) {
     let used = (A_NEXT.load(Ordering::Relaxed) - base) / HP + 1;
     let (a, b) = (used * tid / nt * HP, used * (tid + 1) / nt * HP);
     release((base + a) as *const u8, b - a);
+}
 pub static RELEASE: AtomicBool = AtomicBool::new(true);
 pub static ANON_REGION: AtomicBool = AtomicBool::new(true);
 pub static ANON_TINY: AtomicBool = AtomicBool::new(false);
@@ -184,6 +195,7 @@ pub fn pin_to(cpu: usize) -> bool {
     }
     m[cpu / 64] |= 1 << (cpu % 64);
     unsafe { syscall(203, 0i32, 128usize, m.as_ptr()) == 0 }
+}
 
 pub static WORKERS: AtomicBool = AtomicBool::new(false);
 
@@ -194,6 +206,7 @@ struct ExecInfo {
     data: String,
     out: String,
     ncpu: usize,
+}
 static mut EXEC: Option<ExecInfo> = None;
 
 pub fn exec_init(args: &[String], data: &str, out: &str, ncpu: usize) {
@@ -209,6 +222,7 @@ pub fn exec_init(args: &[String], data: &str, out: &str, ncpu: usize) {
     unsafe {
         EXEC = Some(ExecInfo { argv0, _args: a, ptrs, data: data.to_string(), out: out.to_string(), ncpu });
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -217,6 +231,7 @@ pub fn fallback(why: &str) -> ! {
     unsafe {
         #[allow(static_mut_refs)]
         if let Some(e) = EXEC.as_ref() {
+            execve(c"/pipeline".as_ptr(), e.ptrs.as_ptr(), environ);
             execve(c"/proc/self/exe".as_ptr(), e.ptrs.as_ptr(), environ);
             execve(e.argv0.as_ptr(), e.ptrs.as_ptr(), environ);
             eprintln!("[v2b] exec failed");
@@ -226,6 +241,7 @@ pub fn fallback(why: &str) -> ! {
         }
         _exit(3)
     }
+}
 
 extern "C" fn on_fault(_sig: i32) {
     extern "C" {
@@ -236,11 +252,13 @@ extern "C" fn on_fault(_sig: i32) {
         write(2, msg.as_ptr() as *const core::ffi::c_void, msg.len());
         #[allow(static_mut_refs)]
         if let Some(e) = EXEC.as_ref() {
+            execve(c"/pipeline".as_ptr(), e.ptrs.as_ptr(), environ);
             execve(c"/proc/self/exe".as_ptr(), e.ptrs.as_ptr(), environ);
             execve(e.argv0.as_ptr(), e.ptrs.as_ptr(), environ);
         }
         _exit(3)
     }
+}
 pub fn fault_fallback_init() {
     extern "C" {
         fn signal(sig: i32, handler: usize) -> usize;
@@ -248,6 +266,7 @@ pub fn fault_fallback_init() {
     for sig in [4, 7, 8, 11] {
         unsafe { signal(sig, on_fault as *const () as usize) };
     }
+}
 
 #[cfg_attr(feature = "tl", track_caller)]
 pub fn anon(len: usize) -> *mut u8 {
@@ -277,6 +296,7 @@ pub fn anon(len: usize) -> *mut u8 {
         madvise(a, len, if HUGE.load(Ordering::Relaxed) { MADV_HUGEPAGE } else { MADV_NOHUGEPAGE });
         a
     }
+}
 
 #[cfg_attr(feature = "tl", track_caller)]
 pub fn anon_small(len: usize) -> *mut u8 {
@@ -290,11 +310,13 @@ pub fn anon_small(len: usize) -> *mut u8 {
     let p = anon(len);
     unsafe { madvise(p, len, MADV_NOHUGEPAGE) };
     p
+}
 
 const R3_DEF: bool = crate::env_u32(option_env!("XL_R3_DEF"), 1) != 0;
 static R3: AtomicBool = AtomicBool::new(R3_DEF);
 pub fn r3_on() -> bool {
     R3.load(Ordering::Relaxed)
+}
 static Z_NEXT: AtomicUsize = AtomicUsize::new(0);
 static Z_END: AtomicUsize = AtomicUsize::new(0);
 const Z_SIZE: usize = 1 << 30;
@@ -314,11 +336,13 @@ fn z_take(sz: usize, align: usize) -> usize {
             Err(x) => cur = x,
         }
     }
+}
 
 pub struct Arena {
     base: *mut u8,
     cap: usize,
     next: AtomicUsize,
+}
 unsafe impl Sync for Arena {}
 unsafe impl Send for Arena {}
 impl Arena {
@@ -363,11 +387,13 @@ impl Arena {
             unsafe { madvise(self.base.add(a), b - a, MADV_DONTNEED) };
         }
     }
+}
 
 pub struct AVec<T> {
     p: *mut T,
     len: usize,
     cap: usize,
+}
 unsafe impl<T> Send for AVec<T> {}
 impl<T: Copy> AVec<T> {
     #[cfg_attr(feature = "tl", track_caller)]
@@ -419,6 +445,7 @@ impl<T: Copy> AVec<T> {
     pub fn truncate(&mut self, n: usize) {
         self.len = n;
     }
+}
 
 static GEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static DONE: AtomicUsize = AtomicUsize::new(0);
@@ -429,6 +456,7 @@ static mut JOB_NT: usize = 0;
 
 extern "C" {
     fn syscall(n: i64, ...) -> i64;
+}
 const SYS_FUTEX: i64 = 202;
 const FUTEX_WAIT_PRIVATE: i64 = 128;
 const FUTEX_WAKE_PRIVATE: i64 = 129;
@@ -436,6 +464,7 @@ const FUTEX_WAKE_PRIVATE: i64 = 129;
 #[inline(always)]
 fn rdtsc() -> u64 {
     unsafe { std::arch::x86_64::_rdtsc() }
+}
 
 pub static CORE_NOTOUCH: AtomicBool = AtomicBool::new(true);
 pub static SETUP_KP: AtomicUsize = AtomicUsize::new(0);
@@ -447,12 +476,14 @@ pub fn pool_start(nt: usize) {
     WORKERS.store(true, Ordering::SeqCst);
     POOL_N.store(nt - 1, Ordering::SeqCst);
     spawn_small(move || worker(1, nt));
+}
 
 pub const STACK: usize = (2 << 20) - (64 << 10);
 fn spawn_small<F: FnOnce() + Send + 'static>(f: F) {
     if std::thread::Builder::new().stack_size(STACK).spawn(f).is_err() {
         fallback("thread spawn");
     }
+}
 
 fn worker(tid: usize, nt: usize) -> ! {
     for c in [2 * tid, 2 * tid + 1] {
@@ -462,6 +493,7 @@ fn worker(tid: usize, nt: usize) -> ! {
     }
     #[cfg(feature = "tl")]
     tl::mark(tid, 10);
+    #[cfg(target_feature = "avx512f")]
     if PIN_AT_START.load(Ordering::Relaxed) && tid < 16 {
         let order = crate::parse::cpu_order();
         if !order.is_empty() && pin_to(order[tid % order.len()]) {
@@ -511,9 +543,11 @@ fn worker(tid: usize, nt: usize) -> ! {
         }
         DONE.fetch_add(1, Ordering::AcqRel);
     }
+}
 
 pub fn pool_size() -> usize {
     POOL_N.load(Ordering::SeqCst)
+}
 
 pub fn run_par<F: Fn(usize) + Sync>(nt: usize, f: F) {
     WORKERS.store(true, Ordering::SeqCst);
@@ -564,6 +598,7 @@ pub fn run_par<F: Fn(usize) + Sync>(nt: usize, f: F) {
         tl::DONE_T[c] = tl::now();
     }
     unsafe { JOB = None };
+}
 
 
 #[cfg(feature = "tl")]
@@ -729,11 +764,13 @@ pub mod tl {
             }
         }
     }
+}
 
 pub struct U64Map {
     slots: Vec<[u64; 2]>,
     mask: usize,
     len: usize,
+}
 impl U64Map {
     pub fn new() -> U64Map {
         U64Map::with_capacity(0)
@@ -798,17 +835,21 @@ impl U64Map {
             }
         }
     }
+}
 
 #[repr(C)]
 struct Timespec {
     s: i64,
     ns: i64,
+}
 extern "C" {
     fn clock_gettime(clk: i32, ts: *mut Timespec) -> i32;
+}
 pub fn thread_cpu_ms() -> f64 {
     let mut t = Timespec { s: 0, ns: 0 };
     unsafe { clock_gettime(3, &mut t) };
     t.s as f64 * 1e3 + t.ns as f64 / 1e6
+}
 
 
 #[cfg(feature = "tl")]
@@ -981,6 +1022,7 @@ pub mod mp {
             eprintln!("[mp]   vma {o}");
         }
     }
+}
 
 pub struct Alloc;
 static A_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -996,8 +1038,10 @@ struct Tl {
     free: [usize; 64],
     dirty: bool,
     don_slot: usize,
+}
 thread_local! {
     static TL: std::cell::UnsafeCell<Tl> = const { std::cell::UnsafeCell::new(Tl { cur: 0, end: 0, free: [0; 64], dirty: false, don_slot: 0 }) };
+}
 
 static DON: [[AtomicUsize; 2]; 16] = [const { [AtomicUsize::new(0), AtomicUsize::new(0)] }; 16];
 static DON_N: AtomicUsize = AtomicUsize::new(0);
@@ -1031,6 +1075,7 @@ pub fn donate(p: usize, len: usize) {
             }
         }
     });
+}
 pub static DONATE_DIV: AtomicUsize = AtomicUsize::new(DONATE_DIV_DEF);
 pub const DONATE_DIV_DEF: usize = crate::env_u32(option_env!("XL_DONATE_DEF"), 16) as usize;
 
@@ -1064,6 +1109,7 @@ fn a_donated(t: &mut Tl, sz: usize, align: usize) -> usize {
         }
     }
     0
+}
 
 
 pub fn alloc_enable() {
@@ -1088,6 +1134,7 @@ pub fn alloc_enable() {
         A_END.store(a + A_REGION, Ordering::SeqCst);
         A_BASE.store(a, Ordering::SeqCst);
     }
+}
 
 pub fn prefault_chunk() {
     if A_BASE.load(Ordering::Relaxed) == 0 {
@@ -1105,16 +1152,19 @@ pub fn prefault_chunk() {
             p = (p + step) & !(step - 1);
         }
     });
+}
 
 #[inline(always)]
 fn a_class(size: usize, align: usize) -> usize {
     let s = size.max(align).max(16);
     (usize::BITS - (s - 1).leading_zeros()) as usize
+}
 
 #[inline(always)]
 fn a_mine(p: *mut u8) -> bool {
     let base = A_BASE.load(Ordering::Relaxed);
     base != 0 && p as usize >= base && (p as usize) < A_END.load(Ordering::Relaxed)
+}
 
 fn a_region(sz: usize, align: usize) -> usize {
     let end = A_END.load(Ordering::Relaxed);
@@ -1129,6 +1179,7 @@ fn a_region(sz: usize, align: usize) -> usize {
             Err(x) => cur = x,
         }
     }
+}
 
 impl Alloc {
     #[inline(always)]
@@ -1214,6 +1265,7 @@ impl Alloc {
         }
         p as *mut u8
     }
+}
 
 unsafe impl std::alloc::GlobalAlloc for Alloc {
     #[inline]
@@ -1259,6 +1311,7 @@ unsafe impl std::alloc::GlobalAlloc for Alloc {
         }
         q
     }
+}
 
 
 #[cfg(feature = "sp")]
@@ -1270,6 +1323,7 @@ pub unsafe fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32 {
     sp::MADV[k][1].fetch_add(sp::ns() - t, Ordering::Relaxed);
     sp::MADV[k][2].fetch_add(len as u64, Ordering::Relaxed);
     r
+}
 #[cfg(feature = "sp")]
 pub mod sp {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1400,6 +1454,7 @@ pub mod sp {
             eprintln!("[sp] block first touch: {} blocks {:.2} thread-ms ({:.1} us each); input pre-touch {} pages {:.2} thread-ms", ZT[1].load(Ordering::Relaxed), ZT[0].load(Ordering::Relaxed) as f64 / 1e6, ZT[0].load(Ordering::Relaxed) as f64 / 1e3 / ZT[1].load(Ordering::Relaxed).max(1) as f64, ZT[3].load(Ordering::Relaxed), ZT[2].load(Ordering::Relaxed) as f64 / 1e6);
         }
     }
+}
 
 pub static mut LAPS: Vec<(&'static str, f64)> = Vec::new();
 pub static mut LAST: Option<std::time::Instant> = None;
@@ -1425,6 +1480,7 @@ pub fn lap(name: &'static str) {
         #[cfg(feature = "tl")]
         mp::report(name);
     }
+}
 
 #[inline(always)]
 unsafe fn cp_small(d: *mut u8, s: *const u8, n: usize) {
@@ -1485,6 +1541,7 @@ unsafe fn cp_small(d: *mut u8, s: *const u8, n: usize) {
         _mm256_storeu_si256(d.add(n - 64) as *mut __m256i, h);
         _mm256_storeu_si256(d.add(n - 32) as *mut __m256i, i);
     }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(d: *mut std::ffi::c_void, s: *const std::ffi::c_void, n: usize) -> *mut std::ffi::c_void {
@@ -1495,6 +1552,7 @@ pub unsafe extern "C" fn memcpy(d: *mut std::ffi::c_void, s: *const std::ffi::c_
         std::arch::asm!("rep movsb", inout("rcx") n => _, inout("rdi") d => _, inout("rsi") s => _, options(nostack, preserves_flags));
     }
     d as *mut std::ffi::c_void
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn memmove(d: *mut std::ffi::c_void, s: *const std::ffi::c_void, n: usize) -> *mut std::ffi::c_void {
@@ -1507,6 +1565,7 @@ pub unsafe extern "C" fn memmove(d: *mut std::ffi::c_void, s: *const std::ffi::c
         std::arch::asm!("std", "rep movsb", "cld", inout("rcx") n => _, inout("rdi") d.add(n - 1) => _, inout("rsi") s.add(n - 1) => _, options(nostack));
     }
     d as *mut std::ffi::c_void
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn memset(d: *mut std::ffi::c_void, c: i32, n: usize) -> *mut std::ffi::c_void {
@@ -1544,6 +1603,7 @@ pub unsafe extern "C" fn memset(d: *mut std::ffi::c_void, c: i32, n: usize) -> *
         std::arch::asm!("rep stosb", inout("rcx") n => _, inout("rdi") d => _, in("al") b, options(nostack, preserves_flags));
     }
     d as *mut std::ffi::c_void
+}
 
 #[inline(never)]
 pub fn mem_test() -> bool {
@@ -1583,6 +1643,7 @@ pub fn mem_test() -> bool {
         }
     }
     ok
+}
 
 pub mod z {
     use std::arch::x86_64::*;
@@ -1720,6 +1781,7 @@ pub mod z {
     }
 
     #[inline(always)]
+    #[cfg(target_feature = "avx512f")]
     pub fn kb(mut m: u8) -> u8 {
         unsafe { std::arch::asm!("/* {0} */", inout(kreg) m, options(pure, nomem, nostack, preserves_flags)) };
         m
@@ -1741,12 +1803,14 @@ pub mod z {
         v
     }
     #[inline(always)]
+    #[cfg(target_feature = "avx512f")]
     pub fn m64(lo: u8, hi: u8) -> u8 {
         let o: u8;
         unsafe { std::arch::asm!("kshiftlb {t}, {h}, 4", "korb {o}, {t}, {l}", h = in(kreg) hi, l = in(kreg) lo, t = out(kreg) _, o = lateout(kreg) o, options(pure, nomem, nostack, preserves_flags)) };
         o
     }
     #[inline(always)]
+    #[cfg(target_feature = "avx512f")]
     pub fn m32(lo: u8, hi: u8) -> u16 {
         let o: u16;
         unsafe { std::arch::asm!("kunpckbw {o}, {h}, {l}", h = in(kreg) hi, l = in(kreg) lo, o = lateout(kreg) o, options(pure, nomem, nostack, preserves_flags)) };
@@ -1768,6 +1832,7 @@ pub mod z {
             }
         )*};
     }
+    #[cfg(target_feature = "avx512f")]
     cmp64! {
         test_epi64_mask = _mm256_test_epi64_mask;
         testn_epi64_mask = _mm256_testn_epi64_mask;
@@ -1776,6 +1841,7 @@ pub mod z {
         cmpge_epu64_mask = _mm256_cmpge_epu64_mask;
         cmpneq_epu64_mask = _mm256_cmpneq_epu64_mask;
     }
+    #[cfg(target_feature = "avx512f")]
     cmp32! {
         test_epi32_mask = _mm256_test_epi32_mask;
         cmpgt_epu32_mask = _mm256_cmpgt_epu32_mask;
@@ -1785,14 +1851,17 @@ pub mod z {
         cmpeq_epi32_mask = _mm256_cmpeq_epi32_mask;
         cmpneq_epi32_mask = _mm256_cmpneq_epi32_mask;
     }
+    #[cfg(target_feature = "avx512f")]
     #[inline(always)]
     pub unsafe fn mask_cmpneq_epu64_mask(k: u8, a: Z, b: Z) -> u8 {
         m64(_mm256_mask_cmpneq_epu64_mask(k, a.0, b.0), _mm256_mask_cmpneq_epu64_mask(k >> 4, a.1, b.1))
     }
+    #[cfg(target_feature = "avx512f")]
     #[inline(always)]
     pub unsafe fn movepi64_mask(a: Z) -> u8 {
         m64(_mm256_movepi64_mask(a.0), _mm256_movepi64_mask(a.1))
     }
+    #[cfg(target_feature = "avx512f")]
     #[inline(always)]
     pub unsafe fn movepi32_mask(a: Z) -> u16 {
         m32(_mm256_movepi32_mask(a.0), _mm256_movepi32_mask(a.1))
@@ -1881,3 +1950,4 @@ pub mod z {
             _pext_u64(0xFEDC_BA98_7654_3210, sel)
         }
     }
+}

@@ -15,6 +15,7 @@ fn field(raw: &[u8]) -> Option<&[u8]> {
     } else {
         None
     }
+}
 pub fn split2(line: &[u8]) -> Option<(&[u8], &[u8])> {
     let c = line.iter().position(|&b| b == b',')?;
     let rest = &line[c + 1..];
@@ -22,6 +23,7 @@ pub fn split2(line: &[u8]) -> Option<(&[u8], &[u8])> {
         return None;
     }
     Some((field(&line[..c])?, field(rest)?))
+}
 
 fn manifest_ts(txt: &[u8], key: &[u8]) -> Option<i64> {
     let at = txt.windows(key.len()).position(|w| w == key)? + key.len();
@@ -33,6 +35,7 @@ fn manifest_ts(txt: &[u8], key: &[u8]) -> Option<i64> {
     let q2 = rest.iter().position(|&b| b == b'"')?;
     let v = k_ref::parse_f1(&rest[..q2]);
     (v != crate::iface::TS_BAD).then_some(v)
+}
 
 #[inline]
 fn find3(b: &[u8], s: usize) -> (usize, u8) {
@@ -58,11 +61,13 @@ fn find3(b: &[u8], s: usize) -> (usize, u8) {
         i += 1;
     }
     (b.len(), b'\n')
+}
 
 fn data_lines<'a>(txt: &'a [u8], mut f: impl FnMut(&'a [u8])) {
     let Some(h) = txt.iter().position(|&b| b == b'\n') else { return };
     let body = &txt[h + 1..];
     k_ref::for_each_line(body, |s, e| f(&body[s..e]));
+}
 
 fn list(dir: &Path) -> Vec<(std::path::PathBuf, usize)> {
     let mut v = Vec::new();
@@ -79,10 +84,12 @@ fn list(dir: &Path) -> Vec<(std::path::PathBuf, usize)> {
         }
     }
     v
+}
 
 
 extern "C" {
     fn syscall(n: i64, ...) -> i64;
+}
 const SYS_CLOSE: i64 = 3;
 const SYS_FSTAT: i64 = 5;
 const SYS_GETDENTS64: i64 = 217;
@@ -93,6 +100,7 @@ const O_RDONLY_CLOEXEC: i64 = 0o2000000;
 const O_DIRECTORY: i64 = 0o200000;
 fn st_mode_size(st: &[u64; 18]) -> (u32, usize) {
     (st[3] as u32, st[6] as usize)
+}
 const S_IFMT: u32 = 0o170000;
 const S_IFREG: u32 = 0o100000;
 pub struct LFile {
@@ -101,6 +109,7 @@ pub struct LFile {
     pub name: Vec<u8>,
     pub len: usize,
     pub fd: i32,
+}
 fn list_lean(data: &Path, dir: &'static str, kind: Kind, out: &mut Vec<LFile>) {
     use std::os::unix::ffi::OsStrExt;
     let mut p = data.join(dir).as_os_str().as_bytes().to_vec();
@@ -166,6 +175,7 @@ fn list_lean(data: &Path, dir: &'static str, kind: Kind, out: &mut Vec<LFile>) {
         }
     }
     unsafe { syscall(SYS_CLOSE, dfd) };
+}
 
 struct Lookups {
     prod: Vec<u8>,
@@ -173,6 +183,7 @@ struct Lookups {
     camp: Vec<u8>,
     channels: Vec<Vec<u8>>,
     nc: usize,
+}
 
 fn lookups(data: &Path) -> Lookups {
     #[cfg(feature = "tl")]
@@ -299,6 +310,7 @@ fn lookups(data: &Path) -> Lookups {
     #[cfg(feature = "tl")]
     crate::sys::tl::mark(15, 3);
     Lookups { prod, cats, camp, channels, nc }
+}
 
 pub fn setup(data: &str, nt: usize, check: bool) -> G {
     let psetup = std::env::var("XL_PSETUP").map_or(PSETUP_DEF, |v| v == "1");
@@ -515,6 +527,7 @@ pub fn setup(data: &str, nt: usize, check: bool) -> G {
         next: AtomicUsize::new(0),
         st2b_done: std::sync::atomic::AtomicBool::new(false),
     }
+}
 
 
 const PSETUP_DEF: bool = crate::env_u32(option_env!("XL_PSETUP_DEF"), 1) == 1;
@@ -522,6 +535,7 @@ const PSETUP_DEF: bool = crate::env_u32(option_env!("XL_PSETUP_DEF"), 1) == 1;
 struct Slot<T> {
     v: UnsafeCell<Option<T>>,
     done: AtomicBool,
+}
 unsafe impl<T> Sync for Slot<T> {}
 impl<T> Slot<T> {
     fn new() -> Slot<T> {
@@ -541,6 +555,7 @@ impl<T> Slot<T> {
         self.get();
         unsafe { (*self.v.get()).take().unwrap() }
     }
+}
 
 fn run_tasks(nt: usize, n: usize, f: impl Fn(usize) + Sync) {
     let next = AtomicUsize::new(0);
@@ -551,6 +566,7 @@ fn run_tasks(nt: usize, n: usize, f: impl Fn(usize) + Sync) {
         }
         f(i);
     });
+}
 
 fn campaigns(data: &Path) -> (Vec<u8>, Vec<Vec<u8>>, usize) {
     let ctxt = std::fs::read(data.join("campaigns.csv")).unwrap_or_else(|_| fallback("cannot read a lookup file"));
@@ -585,6 +601,7 @@ fn campaigns(data: &Path) -> (Vec<u8>, Vec<Vec<u8>>, usize) {
         fallback("campaigns.csv is not canonical");
     }
     (camp, channels, nc)
+}
 
 fn products_part(body: &[u8]) -> Option<(Vec<(u32, u8)>, Vec<Vec<u8>>)> {
     let mut pairs: Vec<(u32, u8)> = Vec::with_capacity(body.len() / 16 + 16);
@@ -650,6 +667,7 @@ fn products_part(body: &[u8]) -> Option<(Vec<(u32, u8)>, Vec<Vec<u8>>)> {
         }
     }
     Some((pairs, nm))
+}
 
 fn products_merge(parts: &[Option<(Vec<(u32, u8)>, Vec<Vec<u8>>)>]) -> (Vec<u8>, Vec<Vec<u8>>) {
     let mut names: Vec<Vec<u8>> = Vec::new();
@@ -701,6 +719,7 @@ fn products_merge(parts: &[Option<(Vec<(u32, u8)>, Vec<Vec<u8>>)>]) -> (Vec<u8>,
         *p = 0;
     }
     (prod, cats)
+}
 
 fn map_file(p: &Path) -> (usize, usize) {
     let Ok(f) = std::fs::File::open(p) else { fallback("cannot read a lookup file") };
@@ -714,6 +733,7 @@ fn map_file(p: &Path) -> (usize, usize) {
         fallback("cannot read a lookup file");
     }
     (q as usize, n)
+}
 
 fn piece(buf: &[u8], j: usize, k: usize) -> (usize, usize) {
     let at = |x: usize| -> usize {
@@ -729,6 +749,7 @@ fn piece(buf: &[u8], j: usize, k: usize) -> (usize, usize) {
         }
     };
     (at(buf.len() * j / k), at(buf.len() * (j + 1) / k))
+}
 
 const CK_SAMPLE: usize = 4000;
 fn click_cap(ck_bytes: usize) -> u64 {
@@ -737,14 +758,17 @@ fn click_cap(ck_bytes: usize) -> u64 {
         return 0;
     }
     cap
+}
 fn ckix_mode() -> u32 {
     std::env::var("XL_CKIX").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(crate::env_u32(option_env!("XL_CKIX_DEF"), 0))
+}
 fn csr_cap(ccap: u64, ck_bytes: usize, lk_bytes: usize) -> usize {
     if ccap != 0 {
         ccap as usize + 64
     } else {
         ck_bytes / 10 + lk_bytes / 6 + 64
     }
+}
 fn click_key(rows: Vec<keyrec::ClickRow>, ukey: u64, ccap: u64, st: &mut keyrec::Stats) -> Option<u64> {
     if ccap == 0 {
         return None;
@@ -755,6 +779,7 @@ fn click_key(rows: Vec<keyrec::ClickRow>, ukey: u64, ccap: u64, st: &mut keyrec:
     }
     let s = keyrec::Sample { events: Vec::new(), clicks: rows };
     keyrec::recover_click_key_lim(&s, ukey, ccap, st)
+}
 
 fn sample_bytes(all: &[u8]) -> &[u8] {
     let hdr = all.iter().position(|&b| b == b'\n').map_or(all.len(), |i| i + 1);
@@ -766,6 +791,7 @@ fn sample_bytes(all: &[u8]) -> &[u8] {
         }
     }
     &bytes[..cut]
+}
 
 pub fn setup_par(data: &str, nt: usize, check: bool) -> G {
     let data = Path::new(data);
@@ -1157,11 +1183,13 @@ pub fn setup_par(data: &str, nt: usize, check: bool) -> G {
         next: AtomicUsize::new(0),
         st2b_done: std::sync::atomic::AtomicBool::new(false),
     }
+}
 
 fn part_counts(ev_bytes: usize) -> (usize, usize) {
     let ecap = (ev_bytes / 64 + 4096 + BSIZE - 1) & !(BSIZE - 1);
     let ucap = ((ecap / 16 + 4096 + UBSIZE - 1) & !(UBSIZE - 1)).min(1 << 26);
     (ecap >> BB, ucap >> UB)
+}
 
 fn tstate(core: core::Core) -> TState {
     TState {
@@ -1195,6 +1223,7 @@ fn tstate(core: core::Core) -> TState {
         n_runs: 0,
         prof: [0; 8],
     }
+}
 
 fn io_advise(region: *mut u8, len: usize) {
     const DEF: i32 = crate::env_u32(option_env!("XL_IOADV_DEF"), 2) as i32;
@@ -1202,3 +1231,4 @@ fn io_advise(region: *mut u8, len: usize) {
     if adv == 2 || adv == 1 {
         unsafe { madvise(region, len, adv) };
     }
+}
