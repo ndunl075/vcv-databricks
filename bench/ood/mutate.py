@@ -889,7 +889,7 @@ def main():
     ap.add_argument("--base", required=True)
     ap.add_argument("--variant", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--data-root", default=os.path.expanduser("~/Developer/vcv-data/db"))
+    ap.add_argument("--data-root", default=os.environ.get("VCV_DATA", os.path.expanduser("~/vcv-data/db")))
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
     base = os.path.join(a.data_root, a.base) if not os.path.isabs(a.base) else a.base

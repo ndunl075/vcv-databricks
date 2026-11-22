@@ -9,13 +9,13 @@ out=$DATA_ROOT/expected/$name
 rm -rf "$out"; mkdir -p "$out"
 s=$(date +%s)
 mem=18g
-LOCK=${LOCK:-$HOME/Developer/vcv-rivals/bench.lock}; touch "$LOCK"
+touch "$LOCK"
 # Budget: every oracle run holds the shared lock, runs at 4 CPUs, niced, one at a time.
-lockf "$LOCK" docker run --rm --cpus 4 --memory $mem -v "$REPO_DIR":/repo:ro -v "$DATA_ROOT":/dataroot -w /repo/bench "$TOOLS_IMAGE" \
+"$BENCH_DIR/lockrun.sh" "$LOCK" docker run --rm --cpus 4 --memory $mem -v "$REPO_DIR":/repo:ro -v "$DATA_ROOT":/dataroot -w /repo/bench "$TOOLS_IMAGE" \
   nice -n 10 python oracle/oracle.py --engine "$engine" --work /tmp/oracle-work /dataroot/$name /dataroot/expected/$name \
   || { echo "[expected] $name FAILED"; exit 1; }
 echo $(( $(date +%s) - s )) > "$out/.secs"
-lockf "$LOCK" docker run --rm --cpus 2 -v "$REPO_DIR":/repo:ro -v "$DATA_ROOT":/dataroot -w /repo/bench "$TOOLS_IMAGE" \
+"$BENCH_DIR/lockrun.sh" "$LOCK" docker run --rm --cpus 2 -v "$REPO_DIR":/repo:ro -v "$DATA_ROOT":/dataroot -w /repo/bench "$TOOLS_IMAGE" \
   python compare.py --json /dataroot/expected/$name /dataroot/expected/$name 2>/dev/null | tail -1 \
   | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['digest'])" > "$out/.digest"
 touch "$out/.done"

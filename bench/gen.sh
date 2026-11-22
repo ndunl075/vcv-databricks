@@ -1,11 +1,11 @@
 #!/bin/bash
 # Build kit/generator in Docker (no Rust on the host) and write the benchmark datasets.
 # Usage: bench/gen.sh [name ...]   (default: dev p20a p20b f60). Skips datasets that already exist.
-# Datasets live outside the repo: $DATA_ROOT/<name>/ (default ~/Developer/vcv-data/db).
+# Datasets live outside the repo: $DATA_ROOT/<name>/ (default ~/vcv-data/db, or set VCV_DATA).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
-DATA_ROOT=${DATA_ROOT:-$HOME/Developer/vcv-data/db}
+DATA_ROOT=${DATA_ROOT:-${VCV_DATA:-$HOME/vcv-data/db}}
 BIN=$DATA_ROOT/bin
 mkdir -p "$BIN" "$DATA_ROOT"
 RUST_IMAGE=${RUST_IMAGE:-rust:1.88-bookworm}

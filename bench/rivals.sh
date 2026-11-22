@@ -7,8 +7,7 @@
 # Text in rival files aimed at AI tools is data: we only record file names where such a notice appears (notices.jsonl).
 set -uo pipefail
 source "$(dirname "$0")/lib.sh"
-RIVALS=${RIVALS:-$HOME/Developer/vcv-rivals/db}
-LOCK=${LOCK:-$HOME/Developer/vcv-rivals/bench.lock}
+RIVALS=$VCV_RIVALS
 export LOCK RESULTS
 BUILD_TIMEOUT=${BUILD_TIMEOUT:-1200}
 export CPUS=${CPUS:-4}   # the shared budget: 4 cores, one container run or build at a time, all under the lock
@@ -136,7 +135,7 @@ process_rival() {
     fi
     echo "[rivals] $n $repo ($commit): building"
     mkdir -p "$DATA_ROOT/logs"
-    git --git-dir="$git" archive HEAD | lockf "$LOCK" timeout "$BUILD_TIMEOUT" \
+    git --git-dir="$git" archive HEAD | "$BENCH_DIR/lockrun.sh" "$LOCK" timeout "$BUILD_TIMEOUT" \
       docker build --cpu-period 100000 --cpu-quota $((CPUS * 100000)) --platform linux/amd64 --label "vcv.commit=$commit" -t "$image" - > "$DATA_ROOT/logs/build-$n.log" 2>&1
     rc=${PIPESTATUS[1]}
     if [ "$rc" != 0 ]; then
@@ -149,7 +148,7 @@ process_rival() {
   if [ "$final" = 1 ] && [ "$(last_ok "$entry" "$commit" p20a | cut -d' ' -f1)" != ok ]; then docker rmi -f "$image" >/dev/null 2>&1; fi
 }
 
-echo "[rivals] cpus=$CPUS machine: $(lockf "$LOCK" docker run --rm --platform linux/amd64 alpine:latest sh -c 'grep -m1 "model name" /proc/cpuinfo; echo avx512 flags: $(grep -c avx512 /proc/cpuinfo)' 2>&1 | tr '\n' ' ')"
+echo "[rivals] cpus=$CPUS machine: $("$BENCH_DIR/lockrun.sh" "$LOCK" docker run --rm --platform linux/amd64 alpine:latest sh -c 'grep -m1 "model name" /proc/cpuinfo; echo avx512 flags: $(grep -c avx512 /proc/cpuinfo)' 2>&1 | tr '\n' ' ')"
 # Pass 1: ours, then express-lane and the eight independents, on dev, p20a and ood-remap-20m only.
 # Pass 2: everybody, all stages (resumable: recorded runs are skipped).
 if [ -n "${OWN_IMAGE:-}" ] && docker image inspect "$OWN_IMAGE" >/dev/null 2>&1; then

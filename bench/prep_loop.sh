@@ -2,14 +2,13 @@
 # bench/prep_loop.sh  Make missing OOD datasets and oracle tables, one at a time, in order of value.
 # Everything runs under the shared lock at 4 CPUs (expected.sh, make.sh), niced.
 source "$(dirname "$0")/lib.sh"
-export LOCK=${LOCK:-$HOME/Developer/vcv-rivals/bench.lock}
 mk() {  # mk NAME  -> mutate if the dataset does not exist, then oracle tables
   local name=$1 v size base
   if [[ $name == ood-* ]] && [ ! -f "$DATA_ROOT/$name/.done" ]; then
     size=${name##*-}; v=${name#ood-}; v=${v%-*}
     case $size in 1m) base=dev;; 20m) base=p20a;; 60m) base=f60;; esac
     echo "[prep_loop] mutating $name"
-    lockf "$LOCK" nice -n 10 python3 "$BENCH_DIR/ood/mutate.py" --base $base --variant "$v" --out "$DATA_ROOT/$name" --workers 4 || echo "[prep_loop] $name FAILED"
+    "$BENCH_DIR/lockrun.sh" "$LOCK" nice -n 10 python3 "$BENCH_DIR/ood/mutate.py" --base $base --variant "$v" --out "$DATA_ROOT/$name" --workers 4 || echo "[prep_loop] $name FAILED"
   fi
   [ -f "$DATA_ROOT/$name/.done" ] || [ "$name" = dev ] || [[ $name != ood-* ]] || return 0
   [ -d "$DATA_ROOT/$name" ] && "$BENCH_DIR/expected.sh" "$name" fast

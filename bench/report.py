@@ -11,7 +11,7 @@ import json
 import os
 import statistics
 
-DATA_ROOT = os.environ.get("DATA_ROOT", os.path.expanduser("~/Developer/vcv-data/db"))
+DATA_ROOT = os.environ.get("DATA_ROOT", os.environ.get("VCV_DATA", os.path.expanduser("~/vcv-data/db")))
 
 
 def load(path):
@@ -36,8 +36,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", default=os.path.join(DATA_ROOT, "results.jsonl"))
     ap.add_argument("--out", default=os.path.join(DATA_ROOT, "REPORT.md"))
+    ap.add_argument("--cpus", type=int, default=4, help="only rows measured at this CPU budget (older rows had 8)")
     a = ap.parse_args()
-    rows = load(a.results)
+    rows = [r for r in load(a.results) if r.get("cpus", 8) == a.cpus]
     # latest commit per entry
     last_commit = {}
     for r in rows:
@@ -125,7 +126,8 @@ def main():
     k1 = lambda t: (t["p20"] is None, t["p20"] or inf, t["entry"])
     k2 = lambda t: (t["r20"] is None, t["r20"] or inf, t["p20"] or inf, t["entry"])
     text = ["# Shopping Sessions: rival and entry benchmark", "",
-            "Rosetta/colima times in seconds (relative only; 8 CPUs, 18 GB). Medians over exact runs. "
+            "Rosetta/colima times in seconds (relative only; --cpus %d, NCPU=%d, 18 GB, all runs under the shared lock)." % (a.cpus, a.cpus) + " "
+            " Medians over exact runs. "
             "WRONG = tables differ from the oracle; `*` = judged by agreement between entries (oracle not done yet).", "",
             fmt(k1, "By stock 20M time (p20a)"), "", fmt(k2, "By remap 20M time (steering table)"), ""]
     built_failed = sorted(e for e in notes if not any(k[0] == e for k in runs))
