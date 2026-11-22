@@ -1,0 +1,47 @@
+# Timing only: builds the refs in bench/refs.txt and times them on this runner (public repos get
+# 4 vCPUs). Runs on pushes to this branch alone; nothing here is part of the pipeline.
+name: bench4
+on:
+  push:
+    branches: [bench-4cpu]
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    strategy: {fail-fast: false, matrix: {i: [1, 2, 3, 4]}}
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - run: grep -m1 'model name' /proc/cpuinfo; nproc; free -g | head -2
+      - name: Build refs and generator
+        run: |
+          refs=$(grep -v '^#' bench/refs.txt | tr '\n' ' ')
+          echo "REFS=$refs" >> "$GITHUB_ENV"
+          for r in $refs; do git worktree add -q /tmp/w-$r "origin/$r"; done
+          docker run --rm -v /tmp:/t -v "$PWD/kit/generator/generator":/g rust:1.100.0-alpine3.24 sh -c "apk add -q musl-dev >/dev/null; cd /g && cargo build -q --release; for r in $refs; do cd /t/w-\$r && cargo build -q --release; done"
+          ev=$(cat bench/events.txt)
+          sudo kit/generator/generator/target/release/generate --seed 7 --events $ev --clicks $((ev / 4)) --output /tmp/big >/dev/null
+          sudo chmod -R a+rX /tmp/big /tmp/w-*
+      - name: Time
+        shell: bash {0}
+        run: |
+          cat /tmp/big/*/* > /dev/null
+          n=$(nproc)
+          for k in 1 2 3 4 5; do for r in $REFS; do
+            rm -rf /tmp/o; s=$(date +%s.%N); NCPU=$n /tmp/w-$r/target/release/ss /tmp/big /tmp/o 2>/tmp/e; rc=$?; e=$(date +%s.%N)
+            printf 'T %s %.3f rc=%s %s\n' "$r" "$(echo "$e - $s" | bc)" "$rc" "$(grep '^stages' /tmp/e)"; done; done | tee /tmp/t.txt
+          for r in $REFS; do grep "^T $r " /tmp/t.txt | awk '{print $3}' | sort -n | awk -v r=$r '{a[NR]=$1} END{printf "MEDIAN %s %.3f\n", r, a[int((NR+1)/2)]}'; done
+          # outputs must agree with the first ref
+          pip install -q polars 2>/dev/null >/dev/null || python3 -m pip install -q --break-system-packages polars >/dev/null
+          first=$(echo $REFS | cut -d' ' -f1)
+          for r in $REFS; do rm -rf /tmp/o-$r; NCPU=$n /tmp/w-$r/target/release/ss /tmp/big /tmp/o-$r 2>/dev/null; done
+          for r in $REFS; do python3 - "$first" "$r" <<'PY'
+          import polars as pl, sys
+          a_, b_ = sys.argv[1], sys.argv[2]
+          for t, k in {"user_daily": ["user_id","day"], "campaign_daily": ["campaign_id","channel","day"]}.items():
+              a = pl.read_parquet(f"/tmp/o-{a_}/{t}/*.parquet"); b = pl.read_parquet(f"/tmp/o-{b_}/{t}/*.parquet")
+              j = a.join(b, on=k, how="full", suffix="_b", coalesce=True)
+              vals = [c for c in a.columns if c not in k]
+              d = j.filter(pl.any_horizontal([pl.col(c).ne_missing(pl.col(c + "_b")) for c in vals])).height
+              print(f"SAME {b_} vs {a_} {t}: rows {a.height}/{b.height} differing {d} {'OK' if d == 0 and a.height == b.height else 'BAD'}")
+          PY
+          done

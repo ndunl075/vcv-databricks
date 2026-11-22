@@ -1,0 +1,3 @@
+core-tagbins
+core-tagparts
+core-avx512h
