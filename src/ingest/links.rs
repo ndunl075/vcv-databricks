@@ -12,6 +12,7 @@ pub struct Uf {
     root: Vec<u32>,
     name_at: Vec<(u32, u32)>,
     name_buf: Vec<u8>,
+}
 const RAWKEY: u64 = 1 << 62;
 
 fn hbytes(b: &[u8]) -> u64 {
@@ -22,6 +23,7 @@ fn hbytes(b: &[u8]) -> u64 {
     h ^= h >> 29;
     h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     h ^ (h >> 32)
+}
 
 impl Uf {
     pub fn new() -> Uf {
@@ -170,6 +172,7 @@ impl Uf {
             self.cx(g, &g.t(tid).cx_edges);
         }
     }
+}
 
 #[inline]
 pub fn resolve_normal(g: &G, u: u32, a: u32) -> u64 {
@@ -185,6 +188,7 @@ pub fn resolve_normal(g: &G, u: u32, a: u32) -> u64 {
     } else {
         (u as u64) << 4 | a as u64
     }
+}
 
 pub fn resolve_token(g: &G, tok: u64) -> u64 {
     if tok & RAW == 0 {
@@ -198,6 +202,7 @@ pub fn resolve_token(g: &G, tok: u64) -> u64 {
             None => fallback("raw user ID was not interned"),
         }
     }
+}
 
 pub fn name_of(g: &G, pkey: u64, out: &mut Vec<u8>) {
     out.clear();
@@ -213,6 +218,7 @@ pub fn name_of(g: &G, pkey: u64, out: &mut Vec<u8>) {
         1 => out.extend_from_slice(g.uf.name((pkey & 0xFFFF_FFFF) as u32)),
         _ => g.id_str(pkey & (RAW - 1), b'u', out),
     }
+}
 
 
 #[cfg(feature = "pmu")]
@@ -291,6 +297,7 @@ pub mod pm2 {
         eprintln!("[pm2] parts by size (count/elems): {}", (0..10).map(|c| format!("{}:{}/{}", c, PSZ[c].load(Ordering::Relaxed), PEL[c].load(Ordering::Relaxed))).collect::<Vec<_>>().join(" "));
         eprintln!("[pm2] calls tie {} tie_rows {} rows_ix {} rows {} part {} mid {} tie_rows_n {} rows_n {}", EVC[0].load(Ordering::Relaxed), EVC[1].load(Ordering::Relaxed), EVC[2].load(Ordering::Relaxed), EVC[3].load(Ordering::Relaxed), EVC[4].load(Ordering::Relaxed), EVC[5].load(Ordering::Relaxed), EVC[6].load(Ordering::Relaxed), EVC[7].load(Ordering::Relaxed));
     }
+}
 
 #[derive(Default)]
 pub struct Scratch {
@@ -316,6 +323,7 @@ pub struct Scratch {
     rs: Vec<u32>,
     rowbuf: Vec<u64>,
     d8: Vec<(usize, bool, Vec<[u64; 2]>)>,
+}
 
 use std::arch::x86_64::*;
 use crate::sys::z::{self, Z};
@@ -328,6 +336,7 @@ const SORT_STRIDE: usize = 8;
 #[inline(always)]
 fn sort_clicks(g: &G, s: &mut [[u64; 2]], sc: &mut Scratch) {
     unsafe { sort_from(g, s.as_ptr(), s, sc) }
+}
 
 #[inline(always)]
 unsafe fn sort_from(g: &G, src: *const [u64; 2], s: &mut [[u64; 2]], sc: &mut Scratch) {
@@ -345,6 +354,7 @@ unsafe fn sort_from(g: &G, src: *const [u64; 2], s: &mut [[u64; 2]], sc: &mut Sc
     } else {
         sort_big(g, src, s, sc);
     }
+}
 
 #[inline(never)]
 unsafe fn sort_big(g: &G, src: *const [u64; 2], s: &mut [[u64; 2]], sc: &mut Scratch) {
@@ -376,6 +386,7 @@ unsafe fn sort_big(g: &G, src: *const [u64; 2], s: &mut [[u64; 2]], sc: &mut Scr
         radix_split(g, s, tmp.as_mut_ptr(), top - bits, bits, true, sc);
         sc.tmp = tmp;
     }
+}
 const LSD_MIN: usize = env_u32(option_env!("XL_LSD_MIN"), 2048) as usize;
 
 #[inline(never)]
@@ -423,6 +434,7 @@ unsafe fn lsd_sort(g: &G, s: &mut [[u64; 2]], sc: &mut Scratch) {
     }
     sc.tmp = tmp;
     fix_ties(g, s);
+}
 
 const SPLIT_MIN: usize = env_u32(option_env!("XL_SPLIT_MIN"), 128) as usize;
 const SPLIT_PER: usize = env_u32(option_env!("XL_SPLIT_PER"), 6) as usize;
@@ -469,12 +481,14 @@ unsafe fn radix_split(g: &G, s: &mut [[u64; 2]], tmp: *mut [u64; 2], sh: u32, bi
             radix_split(g, part, tmp.add(a), sh - nb, nb, false, sc);
         }
     }
+}
 
 #[cold]
 #[inline(never)]
 fn slow_sort(g: &G, s: &mut [[u64; 2]]) {
     s.sort_by_key(|c| c[0] >> 32);
     fix_ties(g, s);
+}
 
 #[cold]
 #[inline(never)]
@@ -483,6 +497,7 @@ unsafe fn slow_from(g: &G, src: *const [u64; 2], dst: *mut [u64; 2], n: usize) {
         std::ptr::copy_nonoverlapping(src, dst, n);
     }
     slow_sort(g, std::slice::from_raw_parts_mut(dst, n));
+}
 
 #[inline(never)]
 fn fix_ties(g: &G, s: &mut [[u64; 2]]) {
@@ -509,6 +524,7 @@ fn fix_ties(g: &G, s: &mut [[u64; 2]]) {
             i += 1;
         }
     }
+}
 
 #[inline(always)]
 fn next_tie(s: &[[u64; 2]], mut i: usize) -> usize {
@@ -543,6 +559,7 @@ fn next_tie(s: &[[u64; 2]], mut i: usize) -> usize {
         }
     }
     n
+}
 
 #[inline(always)]
 unsafe fn sort2(g: &G, src: *const [u64; 2], p: *mut [u64; 2]) {
@@ -556,14 +573,17 @@ unsafe fn sort2(g: &G, src: *const [u64; 2], p: *mut [u64; 2]) {
     if x >> 32 == 0 && x >> 4 != 0 {
         fix_ties(g, std::slice::from_raw_parts_mut(p, 2));
     }
+}
 
 #[inline(always)]
 unsafe fn cx(v: Z, perm: Z, hi: u8) -> Z {
     let p = z::permutexvar_epi64(perm, v);
     z::mask_mov_epi64(z::min_epu64(v, p), hi, z::max_epu64(v, p))
+}
 #[inline(always)]
 unsafe fn cx_halves(v: Z) -> Z {
     Z(_mm256_min_epu64(v.0, v.1), _mm256_max_epu64(v.0, v.1))
+}
 #[inline(always)]
 unsafe fn sort8(v: Z) -> Z {
     let p1 = z::setr_epi64(1, 0, 3, 2, 5, 4, 7, 6);
@@ -573,30 +593,37 @@ unsafe fn sort8(v: Z) -> Z {
     let v = cx(v, z::setr_epi64(7, 6, 5, 4, 3, 2, 1, 0), 0xF0);
     let v = cx(v, z::setr_epi64(2, 3, 0, 1, 6, 7, 4, 5), 0xCC);
     cx(v, p1, 0xAA)
+}
 #[inline(always)]
 unsafe fn merge8(v: Z) -> Z {
     let v = cx_halves(v);
     let v = cx(v, z::setr_epi64(2, 3, 0, 1, 6, 7, 4, 5), 0xCC);
     cx(v, z::setr_epi64(1, 0, 3, 2, 5, 4, 7, 6), 0xAA)
+}
 #[inline(always)]
 unsafe fn rev8(v: Z) -> Z {
     Z(_mm256_permute4x64_epi64::<0b00_01_10_11>(v.1), _mm256_permute4x64_epi64::<0b00_01_10_11>(v.0))
+}
 #[inline(always)]
 unsafe fn tie_mask(kc: Z, prev: Z) -> u8 {
     let x = z::xor(kc, prev);
     z::testn_epi64_mask(x, z::set1_epi64(0xFFFF_FFFF_0000_0000u64 as i64)) & z::test_epi64_mask(x, z::set1_epi64(0xFFFF_FFF0))
+}
 #[inline(always)]
 unsafe fn rows_lo(k: Z, p: Z) -> Z {
     let (a, b) = (_mm256_unpacklo_epi64(k.0, p.0), _mm256_unpackhi_epi64(k.0, p.0));
     Z(_mm256_permute2x128_si256::<0x20>(a, b), _mm256_permute2x128_si256::<0x31>(a, b))
+}
 #[inline(always)]
 unsafe fn rows_hi(k: Z, p: Z) -> Z {
     let (a, b) = (_mm256_unpacklo_epi64(k.1, p.1), _mm256_unpackhi_epi64(k.1, p.1));
     Z(_mm256_permute2x128_si256::<0x20>(a, b), _mm256_permute2x128_si256::<0x31>(a, b))
+}
 #[inline(always)]
 unsafe fn pos8(base: i64) -> Z {
     let s = IDX_SH as i64;
     z::setr_epi64(base << s, (base + 1) << s, (base + 2) << s, (base + 3) << s, (base + 4) << s, (base + 5) << s, (base + 6) << s, (base + 7) << s)
+}
 
 #[inline(always)]
 unsafe fn sort_r1(g: &G, src: *const [u64; 2], p: *mut [u64; 2], n: usize) {
@@ -621,6 +648,7 @@ unsafe fn sort_r1(g: &G, src: *const [u64; 2], p: *mut [u64; 2], n: usize) {
     if tie != 0 {
         fix_ties(g, std::slice::from_raw_parts_mut(p, n));
     }
+}
 
 #[inline(always)]
 unsafe fn sort_r2(g: &G, src: *const [u64; 2], p: *mut [u64; 2], n: usize) {
@@ -656,6 +684,7 @@ unsafe fn sort_r2(g: &G, src: *const [u64; 2], p: *mut [u64; 2], n: usize) {
     if tie != 0 {
         fix_ties(g, std::slice::from_raw_parts_mut(p, n));
     }
+}
 
 #[inline(never)]
 unsafe fn sort_net<const R: usize>(g: &G, src: *const [u64; 2], s: &mut [[u64; 2]]) {
@@ -740,6 +769,7 @@ unsafe fn sort_net<const R: usize>(g: &G, src: *const [u64; 2], s: &mut [[u64; 2
     if tie != 0 {
         fix_ties(g, s);
     }
+}
 
 unsafe fn sort_users(g: &G, off: *const u32, base: *mut [u64; 2], ua: usize, ub: usize, sc: &mut Scratch) {
     let cap = ub - ua + 16;
@@ -807,6 +837,7 @@ unsafe fn sort_users(g: &G, off: *const u32, base: *mut [u64; 2], ua: usize, ub:
         pm2::TP[c].fetch_add(t, Ordering::Relaxed);
         pm2::EQ[c].fetch_add(eq, Ordering::Relaxed);
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -857,6 +888,7 @@ fn tie_group(g: &G, s: &mut [[u64; 2]], i: usize) -> usize {
         grp.sort_by(|x, y| crate::events::cid_cmp(g, y[1], x[1]).then_with(|| x[0].cmp(&y[0])));
     }
     b
+}
 static DEFER_RAW: AtomicBool = AtomicBool::new(false);
 static DEFERRED: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
 
@@ -868,6 +900,7 @@ const C8_PAGE: usize = (2 << 20) / 8;
 static MODE8: AtomicBool = AtomicBool::new(false);
 thread_local! {
     static TL_DEF: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 static DEFERRED8: std::sync::Mutex<Vec<(usize, bool, Vec<[u64; 2]>)>> = std::sync::Mutex::new(Vec::new());
 
 #[inline]
@@ -878,6 +911,7 @@ fn c8_take(n: usize) -> usize {
         fallback("CSR capacity");
     }
     at
+}
 #[inline]
 fn c8_seg(sc: &mut Scratch, need: usize) -> usize {
     if sc.seg.1 < sc.seg.0 + need {
@@ -886,6 +920,7 @@ fn c8_seg(sc: &mut Scratch, need: usize) -> usize {
         sc.seg = (at, at + sz);
     }
     sc.seg.0
+}
 
 #[inline(always)]
 unsafe fn keys_out(src: *const [u64; 2], dst: *mut u64, n: usize) {
@@ -900,6 +935,7 @@ unsafe fn keys_out(src: *const [u64; 2], dst: *mut u64, n: usize) {
         *dst.add(i) = (*src.add(i))[0];
         i += 1;
     }
+}
 
 unsafe fn rows_out(cxl: &[u32], soff: *const u32, off8: *const u32, src: *const [u64; 2], ua: usize, ub: usize) {
     let csr8 = C8_BASE.load(Ordering::Relaxed) as *mut u64;
@@ -921,6 +957,7 @@ unsafe fn rows_out(cxl: &[u32], soff: *const u32, off8: *const u32, src: *const 
         fallback("CSR words");
     }
     keys_out(src.add(s), csr8.add(d), e - s);
+}
 
 unsafe fn defer8(utab: &[u16], soff: *const u32, off8: *const u32, src: *const [u64; 2]) {
     TL_DEF.with(|d| {
@@ -942,6 +979,7 @@ unsafe fn defer8(utab: &[u16], soff: *const u32, off8: *const u32, src: *const [
         }
         d.clear();
     });
+}
 
 fn convert16(g: &mut G) {
     let words: usize = 2 * g.ncsr + 64;
@@ -974,6 +1012,7 @@ fn convert16(g: &mut G) {
     g.csr = dst as *mut [u64; 2];
     g.csr_cap = words / 2;
     g.ncsr = at + 16;
+}
 
 struct Heavy {
     ub: usize,
@@ -990,6 +1029,7 @@ struct Heavy {
     scat_fin: AtomicUsize,
     sort_next: AtomicUsize,
     sort_fin: AtomicUsize,
+}
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 const HEAVY_DIV: usize = env_u32(option_env!("XL_HEAVY_DIV"), 4) as usize;
 const SORT_UNITS: usize = 64 + UBSIZE / 64 - 1;
@@ -1004,11 +1044,13 @@ struct Plan {
     base: Vec<usize>,
     next: AtomicUsize,
     fin: AtomicUsize,
+}
 unsafe impl Sync for Plan {}
 static mut PLAN: Option<Plan> = None;
 #[inline(always)]
 fn pbase(ub: usize) -> usize {
     unsafe { *PLAN.as_ref().unwrap_unchecked().base.get_unchecked(ub) }
+}
 
 const CNT_BITS: u64 = 1 << 63 | (UBSIZE as u64 - 1) << 43;
 
@@ -1022,6 +1064,7 @@ fn link_rec(t: &mut TState, utab: &mut [u16], w0: u64) {
     } else {
         t.pend.push((ul as u32, bits));
     }
+}
 
 fn links_done(t: &mut TState, utab: &mut [u16], u0: usize) -> bool {
     #[cfg(feature = "pmu")]
@@ -1081,13 +1124,16 @@ fn links_done(t: &mut TState, utab: &mut [u16], u0: usize) -> bool {
         }
     }
     anyc
+}
 
 #[inline(always)]
 fn utab_of(g: &G, ub: usize) -> &mut [u16] {
     unsafe { std::slice::from_raw_parts_mut(g.utab.add(ub << UB), UBSIZE) }
+}
 #[inline(always)]
 fn off_of(g: &G, ub: usize) -> &mut [u32] {
     unsafe { std::slice::from_raw_parts_mut(g.csr_off.add((ub << UB) + ub), UBSIZE + 1) }
+}
 
 #[inline(always)]
 unsafe fn count_chunk(recs: &[Rec], cnt: *mut u32, lk: *mut u64, mut nl: usize) -> usize {
@@ -1115,6 +1161,7 @@ unsafe fn count_chunk(recs: &[Rec], cnt: *mut u32, lk: *mut u64, mut nl: usize) 
         i += 1;
     }
     nl
+}
 #[inline(always)]
 unsafe fn scatter_chunk(recs: &[Rec], pos: *mut u32, csr: *mut [u64; 2]) {
     let keep = _mm_set_epi64x((RAW | (RAW - 1)) as i64, -1);
@@ -1126,6 +1173,7 @@ unsafe fn scatter_chunk(recs: &[Rec], pos: *mut u32, csr: *mut [u64; 2]) {
         let v = _mm_shuffle_epi32::<0x4E>(_mm_loadu_si128(r as *const Rec as *const __m128i));
         _mm_storeu_si128(csr.add(at as usize) as *mut __m128i, _mm_and_si128(v, keep));
     }
+}
 
 
 
@@ -1160,6 +1208,7 @@ static K8LM: [u8; 16] = {
 #[inline(always)]
 unsafe fn k8_cid(cids: *const u64, k: u64) -> u64 {
     *cids.add(2 * ((k & IDX_BITS) >> IDX_SH) as usize) & CIDM
+}
 
 #[inline(always)]
 unsafe fn cex(v: &mut [__m256i], a: usize, b: usize) {
@@ -1167,14 +1216,17 @@ unsafe fn cex(v: &mut [__m256i], a: usize, b: usize) {
     let hi = _mm256_max_epu64(v[a], v[b]);
     v[a] = lo;
     v[b] = hi;
+}
 #[inline(always)]
 unsafe fn in1(v: __m256i) -> __m256i {
     let s = _mm256_shuffle_epi32::<0x4E>(v);
     _mm256_blend_epi32::<0xCC>(_mm256_min_epu64(v, s), _mm256_max_epu64(v, s))
+}
 #[inline(always)]
 unsafe fn rev1(v: __m256i) -> __m256i {
     let s = _mm256_permute4x64_epi64::<0x1B>(v);
     _mm256_blend_epi32::<0xF0>(_mm256_min_epu64(v, s), _mm256_max_epu64(v, s))
+}
 #[inline(always)]
 unsafe fn mir2(v: &mut [__m256i], a: usize, b: usize) {
     let s = _mm256_shuffle_epi32::<0x4E>(v[b]);
@@ -1182,6 +1234,7 @@ unsafe fn mir2(v: &mut [__m256i], a: usize, b: usize) {
     let mx = _mm256_max_epu64(v[a], s);
     v[a] = _mm256_blend_epi32::<0xCC>(mn, mx);
     v[b] = _mm256_shuffle_epi32::<0x4E>(_mm256_blend_epi32::<0xCC>(mx, mn));
+}
 #[inline(always)]
 unsafe fn mir4(v: &mut [__m256i], a: usize, b: usize) {
     let s = _mm256_permute4x64_epi64::<0x1B>(v[b]);
@@ -1189,6 +1242,7 @@ unsafe fn mir4(v: &mut [__m256i], a: usize, b: usize) {
     let mx = _mm256_max_epu64(v[a], s);
     v[a] = _mm256_blend_epi32::<0xF0>(mn, mx);
     v[b] = _mm256_permute4x64_epi64::<0x1B>(_mm256_blend_epi32::<0xF0>(mx, mn));
+}
 
 
 #[inline(always)]
@@ -1208,6 +1262,7 @@ unsafe fn ks0<const E: bool>(src: *const u64, _n: usize, dst: *mut u64, buf: *mu
     *dst = lo & !IDX_BITS;
     *dst.add(1) = hi & !IDX_BITS;
     0
+}
 
 #[inline(always)]
 unsafe fn ks1<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut u64) -> u32 {
@@ -1236,6 +1291,7 @@ unsafe fn ks1<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut
     let pm = _mm256_set1_epi64x(IDX_BITS as i64);
     _mm256_mask_storeu_epi64(dst.add(0) as *mut i64, ((mb >> 0) & 15) as u8, _mm256_andnot_si256(pm, t[0]));
     0
+}
 
 #[inline(always)]
 unsafe fn ks2<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut u64) -> u32 {
@@ -1274,6 +1330,7 @@ unsafe fn ks2<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut
     _mm256_storeu_si256(dst.add(0) as *mut __m256i, _mm256_andnot_si256(pm, t[0]));
     _mm256_mask_storeu_epi64(dst.add(4) as *mut i64, ((mb >> 4) & 15) as u8, _mm256_andnot_si256(pm, t[1]));
     0
+}
 
 #[inline(always)]
 unsafe fn ks4<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut u64) -> u32 {
@@ -1335,6 +1392,7 @@ unsafe fn ks4<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut
     _mm256_mask_storeu_epi64(dst.add(8) as *mut i64, ((mb >> 8) & 15) as u8, _mm256_andnot_si256(pm, t[2]));
     _mm256_mask_storeu_epi64(dst.add(12) as *mut i64, ((mb >> 12) & 15) as u8, _mm256_andnot_si256(pm, t[3]));
     0
+}
 
 #[inline(always)]
 unsafe fn ks8<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut u64) -> u32 {
@@ -1456,6 +1514,7 @@ unsafe fn ks8<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut
     _mm256_mask_storeu_epi64(dst.add(24) as *mut i64, ((mb >> 24) & 15) as u8, _mm256_andnot_si256(pm, t[6]));
     _mm256_mask_storeu_epi64(dst.add(28) as *mut i64, ((mb >> 28) & 15) as u8, _mm256_andnot_si256(pm, t[7]));
     0
+}
 
 #[inline(always)]
 unsafe fn ks16<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mut u64) -> u32 {
@@ -1725,6 +1784,7 @@ unsafe fn ks16<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *mu
     _mm256_mask_storeu_epi64(dst.add(56) as *mut i64, ((mb >> 56) & 15) as u8, _mm256_andnot_si256(pm, t[14]));
     _mm256_mask_storeu_epi64(dst.add(60) as *mut i64, ((mb >> 60) & 15) as u8, _mm256_andnot_si256(pm, t[15]));
     0
+}
 
 #[cfg(feature = "pmu")]
 #[inline(never)]
@@ -1757,10 +1817,12 @@ unsafe fn ks_any<const E: bool>(src: *const u64, n: usize, dst: *mut u64, buf: *
         17..=32 => ks8::<E>(src, n, dst, buf),
         _ => ks16::<E>(src, n, dst, buf),
     }
+}
 
 #[inline(never)]
 unsafe fn k8_put(rows: &[[u64; 2]], dst: *mut u64, two: bool, sc: &mut Scratch) {
     k8_put2(rows, dst, dst, two, sc)
+}
 #[inline(never)]
 unsafe fn k8_put2(rows: &[[u64; 2]], dst: *mut u64, csr: *mut u64, two: bool, sc: &mut Scratch) {
     TL_DEF.with(|d| {
@@ -1787,6 +1849,7 @@ unsafe fn k8_put2(rows: &[[u64; 2]], dst: *mut u64, csr: *mut u64, two: bool, sc
             *dst.add(i) = r[0];
         }
     }
+}
 
 #[inline(never)]
 unsafe fn k8_tie(g: &G, buf: *const u64, n: usize, cids: *const u64, dst: *mut u64, sc: &mut Scratch) {
@@ -1795,6 +1858,7 @@ unsafe fn k8_tie(g: &G, buf: *const u64, n: usize, cids: *const u64, dst: *mut u
     k8_tie_in(g, buf, n, cids, dst, sc);
     #[cfg(all(feature = "pmu", pm2fine))]
     { let y1 = pm2::rd(); pm2::add(22, y0, y1); }
+}
 const P36: [u64; 9] = [1, 36, 1296, 46656, 1679616, 60466176, 2176782336, 78364164096, 2821109907456];
 const L36: [u8; 65] = {
     let mut t = [1u8; 65];
@@ -1819,6 +1883,7 @@ fn e36(y: u64) -> u64 {
     l += (y >= P36[l.min(8)]) as usize;
     let l = l.min(8);
     (y * P36[8 - l]) << 4 | l as u64
+}
 
 #[inline(always)]
 unsafe fn k8_tie_in(g: &G, buf: *const u64, n: usize, cids: *const u64, dst: *mut u64, sc: &mut Scratch) {
@@ -1892,6 +1957,7 @@ unsafe fn k8_tie_in(g: &G, buf: *const u64, n: usize, cids: *const u64, dst: *mu
         let v = _mm256_andnot_si256(pm, _mm256_loadu_si256(b.add(4 * q) as *const __m256i));
         _mm256_mask_storeu_epi64(dst.add(4 * q) as *mut i64, ((mb >> (4 * q)) & 15) as u8, v);
     }
+}
 
 #[cold]
 #[inline(never)]
@@ -1909,6 +1975,7 @@ unsafe fn k8_tie_rows(g: &G, buf: *const u64, n: usize, cids: *const u64, dst: *
     fix_ties(g, &mut rows);
     k8_put(&rows, dst, false, sc);
     sc.rows = rows;
+}
 
 #[cold]
 #[inline(never)]
@@ -1926,6 +1993,7 @@ unsafe fn k8_rows(g: &G, keys: *const u64, cids: *const u64, n: usize, dst: *mut
     sort_clicks(g, &mut rows[..], sc);
     k8_put(&rows, dst, two, sc);
     sc.rows = rows;
+}
 
 #[cold]
 #[inline(never)]
@@ -1943,16 +2011,19 @@ unsafe fn k8_rows_ix(g: &G, src: *const u64, n: usize, cids: *const u64, dst: *m
     sort_clicks(g, &mut rows[..], sc);
     k8_put(&rows, dst, false, sc);
     sc.rows = rows;
+}
 
 #[inline(always)]
 unsafe fn k8_hist(h: &mut std::mem::MaybeUninit<[u32; 2049]>, np: usize) -> *mut u32 {
     let p = h.as_mut_ptr() as *mut u32;
     std::ptr::write_bytes(p, 0, np + 1);
     p
+}
 
 #[inline(always)]
 fn k8_dig(x: u64, base: u64, sh: u32, np: usize) -> usize {
     (((x >> 32).wrapping_sub(base)) >> sh) as usize & (np - 1)
+}
 
 unsafe fn k8_part(g: &G, src: *mut u64, m: usize, dst: *mut u64, tmp: *mut u64, base: u64, sh: u32, cids: *const u64, sc: &mut Scratch) {
     #[cfg(all(feature = "pmu", pm2fine))]
@@ -2006,6 +2077,7 @@ unsafe fn k8_part(g: &G, src: *mut u64, m: usize, dst: *mut u64, tmp: *mut u64, 
             k8_part(g, tmp.add(a), b - a, dst.add(a), src.add(a), base, sh2, cids, sc);
         }
     }
+}
 
 #[inline(always)]
 unsafe fn k8_range(rw: *const u64, n: usize) -> (u64, u64, u64) {
@@ -2037,6 +2109,7 @@ unsafe fn k8_range(rw: *const u64, n: usize) -> (u64, u64, u64) {
         i += 1;
     }
     (lo >> 32, hi >> 32, o)
+}
 
 #[inline(never)]
 unsafe fn k8_mid(g: &G, rw: *const u64, n: usize, dst: *mut u64, sc: &mut Scratch) {
@@ -2095,6 +2168,7 @@ unsafe fn k8_mid(g: &G, rw: *const u64, n: usize, dst: *mut u64, sc: &mut Scratc
         }
     }
     sc.ka = ka;
+}
 
 #[inline(never)]
 unsafe fn k8_whale(g: &G, rw: *const u64, n: usize, k: *mut u64, sc: &mut Scratch) {
@@ -2280,6 +2354,7 @@ unsafe fn k8_whale(g: &G, rw: *const u64, n: usize, k: *mut u64, sc: &mut Scratc
     sc.wc = tv;
     sc.ka = ov;
     sc.wh = hv;
+}
 
 #[cold]
 #[inline(never)]
@@ -2289,6 +2364,7 @@ unsafe fn k8_fix(g: &G, r: u32, buf: *const u64, n: usize, rw: *const u64, dst: 
     } else {
         k8_rows(g, rw.add(1), rw, n, dst, false, sc);
     }
+}
 
 #[inline(never)]
 unsafe fn link_recs(up: *mut u16, pp: *mut (u32, u16), lkp: *const u64, nl: usize) -> usize {
@@ -2314,6 +2390,7 @@ unsafe fn link_recs(up: *mut u16, pp: *mut (u32, u16), lkp: *const u64, nl: usiz
         np += (ok ^ 1) as usize;
     }
     np
+}
 
 #[inline(always)]
 unsafe fn scatter16(recs: &[Rec], pos: *mut u32, rp: *mut u8) {
@@ -2327,6 +2404,7 @@ unsafe fn scatter16(recs: &[Rec], pos: *mut u32, rp: *mut u8) {
         _mm_storeu_si128(rp.add(at as usize) as *mut __m128i, _mm_loadu_si128(p as *const __m128i));
         p = p.add(1);
     }
+}
 
 #[inline(never)]
 unsafe fn k8_inplace(g: &G, sc: &mut Scratch, utab: &[u16], act: &[u64], clp: *const u8, rsp: *const u32, stp: *const u32, rp: *mut u64, kb: *mut u64) {
@@ -2375,6 +2453,7 @@ unsafe fn k8_inplace(g: &G, sc: &mut Scratch, utab: &[u16], act: &[u64], clp: *c
             }
         }
     }
+}
 
 const K8_ROWS_SEG: usize = env_u32(option_env!("XL_K8_ROWS_SEG"), 1 << 15) as usize;
 
@@ -2397,6 +2476,7 @@ unsafe fn count8(recs: &[Rec], cnt: *mut u32) {
         *cnt.add(_pext_u64((*p.add(i)).w0, CNT_BITS) as usize) += 1;
         i += 1;
     }
+}
 
 fn bucket8(g: &G, t: &mut TState, sc: &mut Scratch, ub: usize) {
     let tstart = std::time::Instant::now();
@@ -2699,6 +2779,7 @@ fn bucket8(g: &G, t: &mut TState, sc: &mut Scratch, ub: usize) {
     let el = tstart.elapsed().as_nanos() as u64;
     t.prof[3] += el;
     t.prof[4] = t.prof[4].max(el);
+}
 
 #[inline]
 fn bucket(g: &G, t: &mut TState, sc: &mut Scratch, ub: usize) {
@@ -2707,6 +2788,7 @@ fn bucket(g: &G, t: &mut TState, sc: &mut Scratch, ub: usize) {
     } else {
         bucket16(g, t, sc, ub)
     }
+}
 
 fn bucket16(g: &G, t: &mut TState, sc: &mut Scratch, ub: usize) {
     let tstart = std::time::Instant::now();
@@ -2825,6 +2907,7 @@ fn bucket16(g: &G, t: &mut TState, sc: &mut Scratch, ub: usize) {
     let el = tstart.elapsed().as_nanos() as u64;
     t.prof[3] += el;
     t.prof[4] = t.prof[4].max(el);
+}
 
 
 fn heavy_count(g: &G, h: &Heavy, th: usize) {
@@ -2846,6 +2929,7 @@ fn heavy_count(g: &G, h: &Heavy, th: usize) {
     if seen != total {
         fallback("click partition count");
     }
+}
 
 fn heavy_links(g: &G, t: &mut TState, h: &Heavy) {
     let ub = h.ub;
@@ -2895,6 +2979,7 @@ fn heavy_links(g: &G, t: &mut TState, h: &Heavy) {
         d += n << two as u32;
     }
     off[UBSIZE] = d;
+}
 
 fn heavy_scatter(g: &G, t: &mut TState, h: &Heavy, th: usize) {
     let mut pos = std::mem::take(&mut t.cnt);
@@ -2927,6 +3012,7 @@ fn heavy_scatter(g: &G, t: &mut TState, h: &Heavy, th: usize) {
     let rp = unsafe { (*h.scr.get()).as_mut_ptr() };
     g.t(th).us.for_each(h.ub, |recs| unsafe { scatter_chunk(recs, pp, rp) });
     t.cnt = pos;
+}
 
 fn heavy_step(g: &G, p: &Plan, t: &mut TState, sc: &mut Scratch) -> bool {
     use Ordering::SeqCst;
@@ -2969,6 +3055,7 @@ fn heavy_step(g: &G, p: &Plan, t: &mut TState, sc: &mut Scratch) -> bool {
         }
     }
     false
+}
 
 
 struct HeavyX {
@@ -2981,11 +3068,13 @@ struct HeavyX {
     sort_next: AtomicUsize,
     sort_fin: AtomicUsize,
     cx: UnsafeCell<Vec<(u32, u8, u8)>>,
+}
 struct Fix {
     user: u32,
     w0: u64,
     slot: usize,
     tok: u64,
+}
 struct PlanX {
     fixes: Vec<Fix>,
     bounds: Vec<usize>,
@@ -2993,6 +3082,7 @@ struct PlanX {
     normal: Vec<u32>,
     next: AtomicUsize,
     fin: AtomicUsize,
+}
 unsafe impl Sync for PlanX {}
 static mut PLANX: Option<PlanX> = None;
 static READY: AtomicBool = AtomicBool::new(false);
@@ -3005,6 +3095,7 @@ pub fn us_finished(g: &G, end: u64, inq: bool) {
     if US_FIN.fetch_add(1, Ordering::SeqCst) + 1 == g.nt && inq {
         prelude(g, true);
     }
+}
 
 fn prelude_ix(g: &G) {
     use crate::ckix::VALID;
@@ -3156,6 +3247,7 @@ fn prelude_ix(g: &G) {
     }
     unsafe { PLANX = Some(PlanX { fixes, bounds, heavy, normal, next: AtomicUsize::new(0), fin: AtomicUsize::new(0) }) };
     READY.store(true, Ordering::SeqCst);
+}
 
 #[inline(never)]
 unsafe fn piece_ix(g: &G, a: usize, b: usize, prev: i64, u0: u32, start: *mut u32) -> bool {
@@ -3189,6 +3281,7 @@ unsafe fn piece_ix(g: &G, a: usize, b: usize, prev: i64, u0: u32, start: *mut u3
         xa = xa.wrapping_add(A) & M40;
     }
     !bad
+}
 
 fn fill_off(off: &mut [u32], lo: usize, hi: usize) {
     off[UBSIZE] = hi as u32;
@@ -3198,6 +3291,7 @@ fn fill_off(off: &mut [u32], lo: usize, hi: usize) {
     if off[0] as usize != lo {
         fallback("click index order");
     }
+}
 
 fn links_ix(g: &G, t: &mut TState, ub: usize, cx: &mut Vec<(u32, u8, u8)>) {
     let u0 = ub << UB;
@@ -3230,6 +3324,7 @@ fn links_ix(g: &G, t: &mut TState, ub: usize, cx: &mut Vec<(u32, u8, u8)>) {
             });
         }
     }
+}
 
 fn bucket_ix(g: &G, p: &PlanX, t: &mut TState, sc: &mut Scratch, ub: usize) {
     let tstart = std::time::Instant::now();
@@ -3254,6 +3349,7 @@ fn bucket_ix(g: &G, p: &PlanX, t: &mut TState, sc: &mut Scratch, ub: usize) {
     t.prof[6] += d2;
     t.prof[3] += el;
     t.prof[4] = t.prof[4].max(el);
+}
 
 fn heavy_step_ix(g: &G, p: &PlanX, t: &mut TState, sc: &mut Scratch) -> bool {
     use Ordering::SeqCst;
@@ -3295,6 +3391,7 @@ fn heavy_step_ix(g: &G, p: &PlanX, t: &mut TState, sc: &mut Scratch) -> bool {
         }
     }
     false
+}
 
 fn job_ix(g: &G, t: &mut TState, sc: &mut Scratch) -> bool {
     let p = unsafe { PLANX.as_ref().unwrap_unchecked() };
@@ -3311,9 +3408,11 @@ fn job_ix(g: &G, t: &mut TState, sc: &mut Scratch) -> bool {
     bucket_ix(g, p, t, sc, p.normal[i] as usize);
     p.fin.fetch_add(1, Ordering::SeqCst);
     true
+}
 fn done_ix() -> bool {
     let p = unsafe { PLANX.as_ref().unwrap_unchecked() };
     p.fin.load(Ordering::SeqCst) == p.normal.len() && p.heavy.iter().all(|h| h.sort_fin.load(Ordering::SeqCst) == SORT_UNITS)
+}
 
 fn fix_odd(g: &G, f: &Fix) {
     let i = f.user as usize + (f.user as usize >> UB);
@@ -3338,6 +3437,7 @@ fn fix_odd(g: &G, f: &Fix) {
     if mixed {
         tie_group(g, rows, ga + 1);
     }
+}
 
 
 type Cand = (u32, u32, u64, u64);
@@ -3357,6 +3457,7 @@ struct HeavyA {
     sort_next: AtomicUsize,
     sort_fin: AtomicUsize,
     cx: UnsafeCell<Vec<(u32, u8, u8)>>,
+}
 struct PlanA {
     heavy: Vec<HeavyA>,
     normal: Vec<u32>,
@@ -3365,6 +3466,7 @@ struct PlanA {
     fixes: std::sync::Mutex<Vec<Fix>>,
     next: AtomicUsize,
     fin: AtomicUsize,
+}
 unsafe impl Sync for PlanA {}
 static mut PLANA: Option<PlanA> = None;
 
@@ -3424,6 +3526,7 @@ fn prelude_a(g: &G) {
     let range = (0..nub).map(|_| z::nv(UnsafeCell::new((0, 0)))).collect();
     unsafe { PLANA = Some(PlanA { heavy, normal, cand, range, fixes: std::sync::Mutex::new(Vec::new()), next: AtomicUsize::new(0), fin: AtomicUsize::new(0) }) };
     READY.store(true, Ordering::SeqCst);
+}
 
 #[inline(always)]
 unsafe fn scatter_a(recs: &[Rec], csr: *mut [u64; 2], u0: u64, lk: *mut u64, mut nl: usize, mm: &mut (usize, usize)) -> usize {
@@ -3453,6 +3556,7 @@ unsafe fn scatter_a(recs: &[Rec], csr: *mut [u64; 2], u0: u64, lk: *mut u64, mut
     }
     *mm = (lo as usize, hi as usize);
     nl
+}
 
 fn place_a(g: &G, p: &PlanA, t: &mut TState, ub: usize, lo: usize, hi: usize) {
     use crate::ckix::VALID;
@@ -3504,6 +3608,7 @@ fn place_a(g: &G, p: &PlanA, t: &mut TState, ub: usize, lo: usize, hi: usize) {
             t.odd_clicks.push([scramble((u as u64) << 9 | a as u64, g.ukey), key, tok]);
         }
     }
+}
 
 fn links_a<'a>(t: &mut TState, utab: &mut [u16], u0: usize, lks: impl Iterator<Item = &'a u64> + Clone, cx: &mut Vec<(u32, u8, u8)>) {
     t.pend.clear();
@@ -3518,6 +3623,7 @@ fn links_a<'a>(t: &mut TState, utab: &mut [u16], u0: usize, lks: impl Iterator<I
             }
         }
     }
+}
 
 fn bucket_a(g: &G, p: &PlanA, t: &mut TState, sc: &mut Scratch, ub: usize) {
     let tstart = std::time::Instant::now();
@@ -3564,6 +3670,7 @@ fn bucket_a(g: &G, p: &PlanA, t: &mut TState, sc: &mut Scratch, ub: usize) {
     t.prof[6] += d2;
     t.prof[3] += el;
     t.prof[4] = t.prof[4].max(el);
+}
 
 fn heavy_step_a(g: &G, p: &PlanA, t: &mut TState, sc: &mut Scratch) -> bool {
     use crate::ckix::VALID;
@@ -3669,6 +3776,7 @@ fn heavy_step_a(g: &G, p: &PlanA, t: &mut TState, sc: &mut Scratch) -> bool {
         }
     }
     false
+}
 
 fn job_a(g: &G, t: &mut TState, sc: &mut Scratch) -> bool {
     let p = unsafe { PLANA.as_ref().unwrap_unchecked() };
@@ -3685,11 +3793,13 @@ fn job_a(g: &G, t: &mut TState, sc: &mut Scratch) -> bool {
     bucket_a(g, p, t, sc, p.normal[i] as usize);
     p.fin.fetch_add(1, Ordering::SeqCst);
     true
+}
 
 struct Tail {
     uf: Uf,
     cx: Vec<Vec<(u32, u8, u8)>>,
     part1: bool,
+}
 static mut TAIL: Option<Tail> = None;
 static TAIL_TAKEN: AtomicBool = AtomicBool::new(true);
 const _: () = crate::events::UF_TAIL_IN_STAGE3;
@@ -3721,9 +3831,11 @@ pub fn uf_tail(g: &G) {
             }
         }
     }
+}
 pub fn uf_take(g: &G) -> Uf {
     uf_tail(g);
     unsafe { TAIL.take().map(|t| t.uf).unwrap_or_else(Uf::new) }
+}
 
 pub fn stage2(g: &mut G) {
     if !READY.load(Ordering::SeqCst) {
@@ -3826,6 +3938,7 @@ pub fn stage2(g: &mut G) {
     unsafe { TAIL = Some(Tail { uf: Uf::new(), cx, part1: true }) };
     TAIL_TAKEN.store(false, Ordering::SeqCst);
     lap("st2a");
+}
 
 fn prelude(g: &G, inq: bool) {
     DBG.store(std::env::var("XL_DBG").is_ok(), Ordering::Relaxed);
@@ -3839,6 +3952,7 @@ fn prelude(g: &G, inq: bool) {
     } else {
         prelude_ix(g);
     }
+}
 #[inline]
 pub fn job(g: &G, t: &mut TState, sc: &mut Scratch) -> bool {
     if !READY.load(Ordering::Acquire) {
@@ -3851,6 +3965,7 @@ pub fn job(g: &G, t: &mut TState, sc: &mut Scratch) -> bool {
     } else {
         job_ix(g, t, sc)
     }
+}
 pub fn done(g: &G) -> bool {
     if !READY.load(Ordering::Acquire) {
         return false;
@@ -3864,6 +3979,7 @@ pub fn done(g: &G) -> bool {
         let p = unsafe { PLAN.as_ref().unwrap_unchecked() };
         p.fin.load(Ordering::SeqCst) == p.normal.len() && p.heavy.iter().all(|h| h.sort_fin.load(Ordering::SeqCst) == SORT_UNITS)
     }
+}
 
 fn mark_complex(g: &G, tok: u64) {
     if tok & RAW == 0 {
@@ -3871,6 +3987,7 @@ fn mark_complex(g: &G, tok: u64) {
             unsafe { *g.utab.add(u as usize) |= COMPLEX };
         }
     }
+}
 
 fn odd_events(g: &mut G) {
     let mut n_odd_ev = 0u64;
@@ -3918,6 +4035,7 @@ fn odd_events(g: &mut G) {
     }
     g.extra = extra;
     g.odd_kept = odd_kept;
+}
 
 fn prelude_part(g: &G) {
     if g.clen > 0xFFFF_FFFF {
@@ -4009,6 +4127,7 @@ fn prelude_part(g: &G) {
     }
     unsafe { PLAN = Some(plan) };
     READY.store(true, Ordering::SeqCst);
+}
 
 fn job_part(g: &G, t: &mut TState, sc: &mut Scratch) -> bool {
     let p = unsafe { PLAN.as_ref().unwrap_unchecked() };
@@ -4042,6 +4161,7 @@ fn job_part(g: &G, t: &mut TState, sc: &mut Scratch) -> bool {
     } else {
         false
     }
+}
 
 
 unsafe fn k8_user(g: &G, k: *mut u64, cids: *const u64, n: usize, sc: &mut Scratch) {
@@ -4067,6 +4187,7 @@ unsafe fn k8_user(g: &G, k: *mut u64, cids: *const u64, n: usize, sc: &mut Scrat
     } else {
         k8_whale(g, rw, n, k, sc);
     }
+}
 
 pub fn k8_bench(g: &G) {
     #[cfg(feature = "pmu")]
@@ -4187,6 +4308,7 @@ pub fn k8_bench(g: &G) {
         }
         eprintln!("[k8bench] n={n}: {:.0} cycles/call, {:.1} per click", el as f64 / reps as f64, el as f64 / (reps * n) as f64);
     }
+}
 
 pub fn sort_bench(g: &G) {
     if std::env::var("XL_SORTBENCH").is_ok_and(|v| v == "8") {
@@ -4255,3 +4377,4 @@ pub fn sort_bench(g: &G) {
         { let q1 = pm2::rd(); eprintln!("[sortbench] n={n}: {:.1} instr/click {:.3} bm/click", (q1[0] - q0[0]) as f64 / (reps * n) as f64, (q1[1] - q0[1]) as f64 / (reps * n) as f64); }
         eprintln!("[sortbench] n={n}: {:.0} cycles/call, {:.1} per click", el as f64 / reps as f64, el as f64 / (reps * n) as f64);
     }
+}

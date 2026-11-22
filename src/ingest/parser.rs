@@ -13,6 +13,7 @@ pub static mut PREFETCH: bool = false;
 static POPW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 fn popw() -> bool {
     *POPW.get_or_init(|| !std::env::var("XL_POPW").is_ok_and(|v| v == "0") && !(crate::sys::r3_on() && crate::sys::HUGE.load(Ordering::Relaxed) && !crate::sys::SMALLPAGES.load(Ordering::Relaxed)))
+}
 const MADV_POPULATE_WRITE: i32 = 23;
 #[cfg(feature = "knobs")]
 pub static mut NOSINK: bool = false;
@@ -42,6 +43,7 @@ pub struct Part {
     pend: Vec<u32>,
     sink: *mut u64,
     sink_buf: Vec<Line>,
+}
 const NOCHUNK: usize = LINK_OFF;
 pub const CK_STAGE: usize = 192;
 const _: () = assert!(LINK_OFF % CK_STAGE == 0 && 64 + CK_STAGE == 256 && CK_STAGE % 64 == 0 && CK_STAGE == EV_STAGE);
@@ -306,6 +308,7 @@ impl Part {
     pub fn count(&self, b: usize) -> usize {
         self.n[b] as usize
     }
+}
 
 pub const EV_STAGE: usize = 192;
 const EV_FULL: usize = 64 + EV_STAGE;
@@ -319,11 +322,13 @@ const R12_NULL: bool = crate::env_u32(option_env!("XL_R12NULL"), 0) == 1;
 #[inline(always)]
 pub fn r12_null(slot: u64) -> u64 {
     slot | ING_MAX << 16
+}
 #[inline(always)]
 pub unsafe fn dec12(e: *const u8) -> Rec {
     let q = (e as *const u64).read_unaligned();
     let h = (e.add(8) as *const u32).read_unaligned() as u64;
     Rec { w0: h << 32 | q >> 59, w1: q & R12_M59 }
+}
 const ESC_CHUNK: usize = 1024;
 const SHCH: bool = crate::env_u32(option_env!("XL_SHCH"), 0) == 1;
 const ESC_LINK: usize = 1008;
@@ -346,10 +351,12 @@ pub struct EvPart {
     sink: *mut u64,
     sink_buf: Vec<Line>,
     esc_pend: Vec<[u64; 3]>,
+}
 unsafe impl Send for EvPart {}
 #[inline(always)]
 const fn ev_empty(b: usize) -> u32 {
     (256 * b + 64) as u32
+}
 impl EvPart {
     pub fn empty() -> EvPart {
         EvPart { stage: Vec::new(), sbase: std::ptr::null_mut(), fill: Vec::new(), cur: Vec::new(), nch: Vec::new(), n: Vec::new(), head: Vec::new(), arena: std::ptr::null(), blk: std::ptr::null_mut(), blk_end: std::ptr::null_mut(), popw: false, pend: Vec::new(), esc_head: Vec::new(), esc_cur: Vec::new(), esc_next: std::ptr::null_mut(), sink: std::ptr::null_mut(), sink_buf: Vec::new(), esc_pend: Vec::new() }
@@ -732,6 +739,7 @@ impl EvPart {
     pub fn count(&self, b: usize) -> usize {
         self.n[b] as usize
     }
+}
 
 #[inline(always)]
 pub(crate) unsafe fn mul8(a: std::arch::x86_64::__m512i, b: std::arch::x86_64::__m512i) -> std::arch::x86_64::__m512i {
@@ -744,6 +752,7 @@ pub(crate) unsafe fn mul8(a: std::arch::x86_64::__m512i, b: std::arch::x86_64::_
     let lo = m(_mm512_castsi512_si256(a), _mm512_castsi512_si256(b));
     let hi = m(_mm512_extracti64x4_epi64::<1>(a), _mm512_extracti64x4_epi64::<1>(b));
     _mm512_inserti64x4::<1>(_mm512_castsi256_si512(lo), hi)
+}
 
 
 #[inline(always)]
@@ -753,14 +762,17 @@ unsafe fn mask64(m: &[u8; 16]) -> u64 {
     let lo = (m.as_ptr() as *const u64).read_unaligned();
     let hi = (m.as_ptr().add(8) as *const u64).read_unaligned();
     _pext_u64(lo, NIB) | _pext_u64(hi, NIB) << 32
+}
 #[inline(always)]
 unsafe fn kst(a: *mut u8, i: usize, k: u8) {
     std::arch::asm!("kmovb byte ptr [{a} + {i}], {k}", a = in(reg) a, i = in(reg) i, k = in(kreg) k, options(nostack, preserves_flags));
+}
 #[inline(always)]
 fn kor(a: u8, b: u8) -> u8 {
     let o: u8;
     unsafe { std::arch::asm!("korb {o}, {a}, {b}", o = lateout(kreg) o, a = in(kreg) a, b = in(kreg) b, options(pure, nomem, nostack, preserves_flags)) };
     o
+}
 #[inline(always)]
 unsafe fn mcmp<const S: bool, const PRED: i32>(k: u8, a: std::arch::x86_64::__m256i, b: std::arch::x86_64::__m256i) -> u8 {
     let o: u8;
@@ -770,19 +782,23 @@ unsafe fn mcmp<const S: bool, const PRED: i32>(k: u8, a: std::arch::x86_64::__m2
         std::arch::asm!("vpcmpuq {o} {{{k}}}, {a:y}, {b:y}, {p}", o = lateout(kreg) o, k = in(kreg) k, a = in(zmm_reg) a, b = in(zmm_reg) b, p = const PRED, options(pure, nomem, nostack, preserves_flags));
     }
     o
+}
 #[inline(always)]
 fn kand(a: u8, b: u8) -> u8 {
     let o: u8;
     unsafe { std::arch::asm!("kandb {o}, {a}, {b}", o = lateout(kreg) o, a = in(kreg) a, b = in(kreg) b, options(pure, nomem, nostack, preserves_flags)) };
     o
+}
 #[inline(always)]
 fn kandn(a: u8, b: u8) -> u8 {
     let o: u8;
     unsafe { std::arch::asm!("kandnb {o}, {a}, {b}", o = lateout(kreg) o, a = in(kreg) a, b = in(kreg) b, options(pure, nomem, nostack, preserves_flags)) };
     o
+}
 #[inline(always)]
 unsafe fn st4<const D: usize>(a: *mut u8, i: usize, v: std::arch::x86_64::__m256i) {
     std::arch::asm!("vmovdqa ymmword ptr [{a} + 8*{i} + {d}], {v}", a = in(reg) a, i = in(reg) i, d = const D, v = in(ymm_reg) v, options(nostack, preserves_flags));
+}
 #[inline(always)]
 unsafe fn mul4m<const D: usize>(base: *const u8, j: usize, b: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i {
     let o: std::arch::x86_64::__m256i;
@@ -792,26 +808,31 @@ unsafe fn mul4m<const D: usize>(base: *const u8, j: usize, b: std::arch::x86_64:
         options(pure, readonly, nostack, preserves_flags)
     );
     o
+}
 #[inline(always)]
 fn hide(v: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i {
     let r: std::arch::x86_64::__m256i;
     unsafe { std::arch::asm!("/* {r:y} */", r = inout(zmm_reg) v => r, options(pure, nomem, nostack, preserves_flags)) };
     r
+}
 #[inline(always)]
 unsafe fn blendm(k: u8, a: std::arch::x86_64::__m256i, b: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i {
     let r: std::arch::x86_64::__m256i;
     std::arch::asm!("vpblendmq {r:y} {{{k}}}, {a:y}, {b:y}", r = lateout(zmm_reg) r, k = in(kreg) k, a = in(zmm_reg) a, b = in(zmm_reg) b, options(pure, nomem, nostack, preserves_flags));
     r
+}
 #[inline(always)]
 unsafe fn mulu(a: std::arch::x86_64::__m256i, b: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i {
     let r: std::arch::x86_64::__m256i;
     std::arch::asm!("vpmuludq {r:y}, {a:y}, {b:y}", r = lateout(zmm_reg) r, a = in(zmm_reg) a, b = in(zmm_reg) b, options(pure, nomem, nostack, preserves_flags));
     r
+}
 #[inline(always)]
 unsafe fn mul4(a: std::arch::x86_64::__m256i, b: std::arch::x86_64::__m256i) -> std::arch::x86_64::__m256i {
     let r: std::arch::x86_64::__m256i;
     std::arch::asm!("vpmullq {r}, {x}, {y}", r = lateout(ymm_reg) r, x = in(ymm_reg) a, y = in(ymm_reg) b, options(pure, nomem, nostack, preserves_flags));
     r
+}
 #[inline(always)]
 unsafe fn line_out<const NT: bool>(dst: *mut u8, src: *const u8) {
     if NT {
@@ -833,6 +854,7 @@ unsafe fn line_out<const NT: bool>(dst: *mut u8, src: *const u8) {
             options(nostack, preserves_flags)
         );
     }
+}
 #[inline(always)]
 unsafe fn block_out<const NT: bool>(dst: *mut u8, src: *const u8) {
     const _: () = assert!(EV_STAGE == 192);
@@ -858,6 +880,7 @@ unsafe fn block_out<const NT: bool>(dst: *mut u8, src: *const u8) {
             line_out::<false>(dst.add(64 * k), src.add(64 * k));
         }
     }
+}
 #[inline(always)]
 pub(crate) unsafe fn eq64(p: *const u8, c: u8) -> u64 {
     use std::arch::x86_64::*;
@@ -871,21 +894,25 @@ pub(crate) unsafe fn eq64(p: *const u8, c: u8) -> u64 {
         options(pure, readonly, nostack, preserves_flags)
     );
     m
+}
 #[repr(C, align(64))]
 pub struct Out {
     rec: [[u64; 2]; NB],
     ob: [u64; NB],
     lp: [u64; NB],
     pd: crate::ckix::Pend,
+}
 impl Out {
     fn new() -> Box<Out> {
         unsafe { Box::new(std::mem::zeroed()) }
     }
+}
 
 struct Tabs {
     prod: std::mem::ManuallyDrop<Vec<u8>>,
     camp: std::mem::ManuallyDrop<Vec<u8>>,
     crange: Option<(u64, u64)>,
+}
 static TABS: std::sync::OnceLock<Tabs> = std::sync::OnceLock::new();
 fn make_tabs(gprod: &[u8], gcamp: &[u8]) -> Tabs {
     let mut prod = vec![0u8; PBOUND + 1 + 64];
@@ -894,10 +921,13 @@ fn make_tabs(gprod: &[u8], gcamp: &[u8]) -> Tabs {
     camp[..CBOUND].copy_from_slice(&gcamp[..CBOUND]);
     let crange = camp_range(&camp[..CBOUND]);
     Tabs { prod: std::mem::ManuallyDrop::new(prod), camp: std::mem::ManuallyDrop::new(camp), crange }
+}
 fn tabs(g: &G) -> &'static Tabs {
     TABS.get_or_init(|| make_tabs(&g.prod, &g.camp))
+}
 pub fn init_tabs(prod: &[u8], camp: &[u8]) {
     let _ = TABS.set(make_tabs(prod, camp));
+}
 pub unsafe fn init_tabs_shared(prod: *const u8, np: usize, camp: *const u8, nc: usize) {
     if np < PBOUND + 1 + 64 || nc < CBOUND + 64 {
         fallback("lookup table padding");
@@ -905,6 +935,7 @@ pub unsafe fn init_tabs_shared(prod: *const u8, np: usize, camp: *const u8, nc: 
     let v = |p: *const u8, n: usize| std::mem::ManuallyDrop::new(Vec::from_raw_parts(p as *mut u8, n, n));
     let crange = camp_range(std::slice::from_raw_parts(camp, CBOUND));
     let _ = TABS.set(Tabs { prod: v(prod, np), camp: v(camp, nc), crange });
+}
 pub static CORE_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static PARTS_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -912,6 +943,7 @@ fn camp_range(t: &[u8]) -> Option<(u64, u64)> {
     let lo = t.iter().position(|&c| c != 255)?;
     let hi = t.iter().rposition(|&c| c != 255)?;
     if t[lo..=hi].iter().all(|&c| c != 255) { Some((lo as u64, (hi - lo) as u64)) } else { None }
+}
 
 struct Ctx<'a> {
     g: &'a G,
@@ -923,6 +955,7 @@ struct Ctx<'a> {
     tid: u64,
     base: u64,
     fend: u64,
+}
 impl<'a> Ctx<'a> {
     #[inline(always)]
     fn token(&mut self, id: u64) -> u64 {
@@ -1165,6 +1198,7 @@ impl<'a> Ctx<'a> {
             self.ck_one(&r);
         }
     }
+}
 
 struct EvP {
     ing_base: i64,
@@ -1176,6 +1210,7 @@ struct EvP {
     ecap: u64,
     ptab: *const u8,
     sinkb: u64,
+}
 
 #[inline(always)]
 unsafe fn ev_vec<const TSB: bool>(eb: &mut EvBatch, out: &mut Out, n: usize, p: &EvP) -> (u64, u64, bool, u64) {
@@ -1300,6 +1335,7 @@ unsafe fn ev_vec<const TSB: bool>(eb: &mut EvBatch, out: &mut Out, n: usize, p: 
         out.rec.get_unchecked_mut(i)[0] |= (*p.ptab.add(prod) as u64) << 4;
     }
     (okb, spb, badb, 0)
+}
 
 struct CkP {
     cbase: i64,
@@ -1311,6 +1347,7 @@ struct CkP {
     ctab: *const u8,
     crange: Option<(u64, u64)>,
     sinkb: u64,
+}
 
 #[inline(always)]
 unsafe fn ck_vec<const RANGED: bool, const MODE_A: bool>(cb: &CkBatch, out: &mut Out, n: usize, p: &CkP) -> (u64, u64) {
@@ -1390,6 +1427,7 @@ unsafe fn ck_vec<const RANGED: bool, const MODE_A: bool>(cb: &CkBatch, out: &mut
     let nm = if n >= 64 { !0 } else { (1u64 << n) - 1 };
     let (okb, kpb) = (mask64(&mk[0]), mask64(&mk[1]));
     (okb & nm, kpb & !okb & nm)
+}
 
 impl<'a> EventSink for Ctx<'a> {
     #[inline(always)]
@@ -1400,6 +1438,7 @@ impl<'a> EventSink for Ctx<'a> {
     fn ev_flush(&mut self) {
         self.ev_batch();
     }
+}
 
 impl<'a> ClickSink for Ctx<'a> {
     #[inline(always)]
@@ -1410,6 +1449,7 @@ impl<'a> ClickSink for Ctx<'a> {
     fn ck_flush(&mut self) {
         self.ck_batch();
     }
+}
 
 #[inline(always)]
 unsafe fn link_pre(p: *const u8, len: usize) -> Option<(u64, u32, u64, u32)> {
@@ -1436,6 +1476,7 @@ unsafe fn link_pre(p: *const u8, len: usize) -> Option<(u64, u32, u64, u32)> {
         return None;
     }
     Some(((p.add(sa + 1) as *const u64).read_unaligned(), la - 1, (p.add(sb + 1) as *const u64).read_unaligned(), lv - 1))
+}
 
 #[inline(always)]
 unsafe fn link_fast(p: *const u8, len: usize) -> Option<(u64, u64)> {
@@ -1446,6 +1487,7 @@ unsafe fn link_fast(p: *const u8, len: usize) -> Option<(u64, u64)> {
         return None;
     }
     Some((ia, ib))
+}
 
 #[inline(always)]
 unsafe fn b36_vec4(w: std::arch::x86_64::__m256i, n: std::arch::x86_64::__m256i) -> (std::arch::x86_64::__m256i, u8) {
@@ -1464,6 +1506,7 @@ unsafe fn b36_vec4(w: std::arch::x86_64::__m256i, n: std::arch::x86_64::__m256i)
     let r = _mm256_add_epi64(_mm256_mul_epu32(q, s(1_679_616)), _mm256_srli_epi64::<32>(q));
     let canon = _mm256_cmpeq_epi64_mask(n, s(1)) | _mm256_cmpneq_epi64_mask(_mm256_and_si256(w, s(0xFF)), s(0x30));
     (r, good & canon & _mm256_cmple_epu64_mask(r, s(crate::keyrec::MASK)))
+}
 
 #[inline(never)]
 fn link_slow(c: &mut Ctx, buf: &[u8], s: usize, e: usize) {
@@ -1493,6 +1536,7 @@ fn link_slow(c: &mut Ctx, buf: &[u8], s: usize, e: usize) {
     let ta = if ia & ID_ODD == 0 { ia } else { c.raw_token(c.base + oa as u64, a.len()) };
     let tb = if ib & ID_ODD == 0 { ib } else { c.raw_token(c.base + ob as u64, b.len()) };
     c.t.gen_edges.push((ta, tb));
+}
 
 #[repr(C, align(64))]
 #[derive(Clone, Copy)]
@@ -1504,6 +1548,7 @@ struct LkRow {
     na: u64,
     nb: u64,
     _pad: [u64; 4],
+}
 const LK_ROWS: usize = 32 * 16 + 33;
 const fn lk_rows() -> [LkRow; LK_ROWS] {
     let mut t = [LkRow { e: [0; 32], m: [0; 32], offa: -1, offb: 0, na: 0, nb: 0, _pad: [0; 4] }; LK_ROWS];
@@ -1538,6 +1583,7 @@ const fn lk_rows() -> [LkRow; LK_ROWS] {
         c0 += 1;
     }
     t
+}
 static LKP: [LkRow; LK_ROWS] = lk_rows();
 const _: () = assert!(std::mem::size_of::<LkRow>() == 128 && std::mem::offset_of!(LkRow, m) == 32 && std::mem::offset_of!(LkRow, offa) == 64 && std::mem::offset_of!(LkRow, na) == 80);
 
@@ -1614,6 +1660,7 @@ unsafe fn lk_loop(p: *const u8, lim: *const u8, lb: *mut LkBatch, n: usize) -> (
         );
     }
     (code, np, nn)
+}
 
 fn links_chunk(c: &mut Ctx, buf: &[u8]) {
     let len = buf.len();
@@ -1652,6 +1699,7 @@ fn links_chunk(c: &mut Ctx, buf: &[u8]) {
             }
         }
     }
+}
 
 #[repr(C, align(64))]
 struct LkBatch {
@@ -1660,6 +1708,7 @@ struct LkBatch {
     na: [u64; NB],
     nb: [u64; NB],
     at: [u64; NB],
+}
 
 #[inline(never)]
 fn lk_batch(c: &mut Ctx, buf: &[u8], lb: &mut LkBatch, n: usize) {
@@ -1737,6 +1786,7 @@ fn lk_batch(c: &mut Ctx, buf: &[u8], lb: &mut LkBatch, n: usize) {
         genb &= genb - 1;
         c.t.gen_edges.push((lb.a[i], lb.b[i]));
     }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2436,6 +2486,7 @@ mod tests {
             }
         }
     }
+}
 
 #[inline]
 fn next_line_start(data: &[u8], from: usize) -> usize {
@@ -2443,6 +2494,7 @@ fn next_line_start(data: &[u8], from: usize) -> usize {
         Some(i) => from + i + 1,
         None => data.len(),
     }
+}
 
 struct Drv {
     rd: usize,
@@ -2450,14 +2502,17 @@ struct Drv {
     qord: u32,
     ch: usize,
     st2q: bool,
+}
 static DRV: std::sync::OnceLock<Drv> = std::sync::OnceLock::new();
 fn drv() -> &'static Drv {
     DRV.get_or_init(|| {
         let n = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d);
         Drv { rd: n("XL_RD", RD_DEFAULT) << 10, pin: n("XL_PIN", PIN_DEFAULT) as u32, qord: n("XL_QORD", QORD_DEFAULT) as u32, ch: n("XL_CH", CH_DEFAULT) << 10, st2q: n("XL_ST2Q", 1) == 1 }
     })
+}
 pub fn pin_mode() -> u32 {
     drv().pin
+}
 const RD_DEFAULT: usize = env_u32(option_env!("XL_RD_DEF"), 0) as usize;
 const PIN_DEFAULT: usize = env_u32(option_env!("XL_PIN_DEF"), 2) as usize;
 const QORD_DEFAULT: usize = env_u32(option_env!("XL_QORD_DEF"), 2) as usize;
@@ -2496,6 +2551,7 @@ pub(crate) fn fault_around_check(region: *const u8, files: &[FileInfo]) {
     if own == 2 {
         RD_AUTO.store(RD_AUTO_BYTES, Ordering::Relaxed);
     }
+}
 
 pub static mut FDS: Vec<i32> = Vec::new();
 #[allow(static_mut_refs)]
@@ -2511,19 +2567,23 @@ pub unsafe fn keep_fd(f: std::fs::File) {
         }
     }
     FDS.push(-1);
+}
 const KEEP_FDS: usize = 40;
 const FD_ALL_MAX: usize = 900;
 #[allow(static_mut_refs)]
 pub unsafe fn fds_init(n: usize) {
     FDS = vec![-1; n];
+}
 #[allow(static_mut_refs)]
 pub unsafe fn set_fd(i: usize, f: std::fs::File) {
     if (crate::sys::FD_ALL.load(Ordering::Relaxed) && i < FD_ALL_MAX) || (drv().rd > 0 && i < KEEP_FDS) {
         *FDS.as_mut_ptr().add(i) = std::os::fd::IntoRawFd::into_raw_fd(f);
     }
+}
 extern "C" {
     fn pread(fd: i32, buf: *mut u8, n: usize, off: i64) -> isize;
     fn syscall(n: i64, ...) -> i64;
+}
 
 unsafe fn read_at(fd: i32, dst: *mut u8, n: usize, off: usize, flen: usize) -> usize {
     let mut got = 0usize;
@@ -2538,6 +2598,7 @@ unsafe fn read_at(fd: i32, dst: *mut u8, n: usize, off: usize, flen: usize) -> u
         got += r as usize;
     }
     got
+}
 
 pub(crate) fn cpu_order() -> &'static Vec<usize> {
     static O: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
@@ -2579,6 +2640,7 @@ pub(crate) fn cpu_order() -> &'static Vec<usize> {
         }
         out
     })
+}
 
 fn work_queue(g: &G) -> &'static (Vec<Chunk>, usize) {
     static Q: std::sync::OnceLock<(Vec<Chunk>, usize)> = std::sync::OnceLock::new();
@@ -2587,6 +2649,7 @@ fn work_queue(g: &G) -> &'static (Vec<Chunk>, usize) {
         let n = v.iter().rposition(|c| g.files[c.file as usize].kind != Kind::Ev).map_or(0, |i| i + 1);
         (v, n)
     })
+}
 fn work_queue_build(g: &G) -> Vec<Chunk> {
     {
         let d = drv();
@@ -2624,6 +2687,7 @@ fn work_queue_build(g: &G) -> Vec<Chunk> {
         }
         v
     }
+}
 
 #[inline(always)]
 fn parse_buf(g: &G, t: &mut TState, eb: &mut EvBatch, cb: &mut CkBatch, out: &mut Out, tb: &'static Tabs, tid: usize, f: &FileInfo, buf: &[u8], s: usize) {
@@ -2647,6 +2711,7 @@ fn parse_buf(g: &G, t: &mut TState, eb: &mut EvBatch, cb: &mut CkBatch, out: &mu
             }
         }
     }
+}
 
 #[allow(clippy::too_many_arguments)]
 unsafe fn chunk_rd(g: &G, t: &mut TState, eb: &mut EvBatch, cb: &mut CkBatch, out: &mut Out, tb: &'static Tabs, tid: usize, f: &FileInfo, c: &Chunk, fd: i32, rb: *mut u8, rd: usize) {
@@ -2700,6 +2765,7 @@ unsafe fn chunk_rd(g: &G, t: &mut TState, eb: &mut EvBatch, cb: &mut CkBatch, ou
         o = 0;
         n = read_at(fd, rb, rd, pos, flen);
     }
+}
 
 pub fn stage1(g: &G, tid: usize) {
     #[cfg(feature = "sp")]
@@ -2862,6 +2928,7 @@ pub fn stage1(g: &G, tid: usize) {
     pmu::stop(pm, g.nt);
     #[cfg(feature = "sp")]
     crate::sys::sp::thread_add(tid, sp0, crate::sys::sp::ru(1));
+}
 
 #[cfg(feature = "pmu")]
 pub mod pmu {
@@ -2918,6 +2985,7 @@ pub mod pmu {
             eprintln!("[pmu] thread totals (whole thread life): utime_ms={:.1} stime_ms={:.1} nvcsw={} nivcsw={}", RU[0].load(Ordering::Relaxed) as f64 / 1e3, RU[1].load(Ordering::Relaxed) as f64 / 1e3, RU[2].load(Ordering::Relaxed), RU[3].load(Ordering::Relaxed));
         }
     }
+}
 
 
 const FR_K_DEF: usize = env_u32(option_env!("XL_RELK_DEF"), 8) as usize;
@@ -2925,11 +2993,13 @@ static FR_K: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 #[inline]
 fn fr_k() -> usize {
     *FR_K.get_or_init(|| std::env::var("XL_RELK").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(FR_K_DEF).max(1))
+}
 const FR_LAG_DEF: usize = env_u32(option_env!("XL_FRLAG_DEF"), 32) as usize;
 static FR_LAG: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 #[inline]
 fn fr_lag() -> usize {
     *FR_LAG.get_or_init(|| std::env::var("XL_FRLAG").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(FR_LAG_DEF))
+}
 static FR_DONE: std::sync::OnceLock<Vec<std::sync::atomic::AtomicBool>> = std::sync::OnceLock::new();
 static FR_FRONT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[inline(never)]
@@ -2970,6 +3040,7 @@ fn fr_done(g: &G, q: &[crate::Chunk], i: usize, k: usize) {
             eprintln!("[fr] released {} MB in {} calls, {} chunks, K {}", FR_BYTES.load(Ordering::Relaxed) >> 20, FR_CALLS.load(Ordering::Relaxed), q.len(), k);
         }
     }
+}
 fn fr_rel(g: &G, a: usize, b: usize) {
     let a = (a + 4095) & !4095;
     let b = b & !4095;
@@ -2978,6 +3049,7 @@ fn fr_rel(g: &G, a: usize, b: usize) {
         FR_BYTES.fetch_add(b - a, Ordering::Relaxed);
         FR_CALLS.fetch_add(1, Ordering::Relaxed);
     }
+}
 const FR_GAP: usize = 4 << 20;
 #[cfg(feature = "sp")]
 pub static SPTOUCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

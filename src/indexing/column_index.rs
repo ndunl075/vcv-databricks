@@ -11,6 +11,7 @@ pub struct Pend {
     at: [u64; NB + 8],
     n: usize,
     pub end: u64,
+}
 
 pub struct CkxP {
     pub cbase: i64,
@@ -22,6 +23,7 @@ pub struct CkxP {
     pub ctab: *const u8,
     pub crange: Option<(u64, u64)>,
     pub csr: *mut [u64; 2],
+}
 
 #[inline(always)]
 pub unsafe fn flush(pd: &mut Pend, csr: *mut [u64; 2]) {
@@ -31,11 +33,13 @@ pub unsafe fn flush(pd: &mut Pend, csr: *mut [u64; 2]) {
         _mm_store_si128(csr.add(*pd.at.get_unchecked(i) as usize) as *mut __m128i, r);
     }
     pd.n = 0;
+}
 
 #[inline(always)]
 pub unsafe fn store_one(pd: &mut Pend, csr: *mut [u64; 2], c: u64, w0: u64, u: u64) {
     *csr.add(c as usize) = [w0, u | VALID];
     pd.end = pd.end.max(c + 1);
+}
 
 #[inline(always)]
 pub unsafe fn ck_vec_ix(cb: &CkBatch, pd: &mut Pend, n: usize, p: &CkxP) -> u64 {
@@ -118,4 +122,5 @@ pub unsafe fn ck_vec_ix(cb: &CkBatch, pd: &mut Pend, n: usize, p: &CkxP) -> u64 
     }
     pd.end = pd.end.max(_mm512_reduce_max_epu64(endv));
     spb
+}
 const PF_AHEAD: bool = env_u32(option_env!("XL_CKPF"), 1) == 1;

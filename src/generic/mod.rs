@@ -16,22 +16,27 @@ const PS: usize = 256;
 
 fn take<T: Default>(m: &Mutex<T>) -> T {
     std::mem::take(&mut *m.lock().unwrap_or_else(|e| e.into_inner()))
+}
 
 enum P1<'a> {
     None,
     E(Parts<Ev<'a>>),
     C(Vec<Ck0<'a>>),
+}
 enum P2<'a> {
     R(Parts<Rec<'a>>),
     C(Parts<Ck<'a>>),
+}
 
 #[derive(Default)]
 struct P1Bufs<'a> {
     ev: Vec<(Ev<'a>, u32)>,
+}
 #[derive(Default)]
 struct P2Bufs<'a> {
     d: DedupBufs<'a>,
     ck: Vec<(Ck<'a>, u32)>,
+}
 
 pub fn run(data_dir: &Path, out_dir: &Path, ncpu: usize) -> io::Result<()> {
     let ncpu = ncpu.max(1);
@@ -203,6 +208,7 @@ pub fn run(data_dir: &Path, out_dir: &Path, ncpu: usize) -> io::Result<()> {
     drop(acc);
     lap("free");
     Ok(())
+}
 
 fn clear_parquet(dir: &Path) -> io::Result<()> {
     for e in std::fs::read_dir(dir)? {
@@ -213,10 +219,12 @@ fn clear_parquet(dir: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
 
 struct StrBuf {
     off: Vec<u32>,
     data: Vec<u8>,
+}
 impl StrBuf {
     fn new(n: usize, bytes: usize) -> StrBuf {
         let mut off = Vec::with_capacity(n + 1);
@@ -230,6 +238,7 @@ impl StrBuf {
     fn col(&self) -> pqw::StrCol<'_> {
         pqw::StrCol { offsets: &self.off, data: &self.data }
     }
+}
 
 const STREAM: pqw::Method = pqw::Method::Stream(1 << 20);
 
@@ -284,6 +293,7 @@ fn write_users(path: &Path, group: &[Vec<UserRow>], cat_names: &[B]) -> io::Resu
     ];
     write_file(path, &cols, &Opts::default(), STREAM)?;
     Ok(())
+}
 
 fn write_campaigns(path: &Path, acc: &Acc, camp_ids: &[B], channels: &[B]) -> io::Result<()> {
     use pqw::*;
@@ -316,3 +326,4 @@ fn write_campaigns(path: &Path, acc: &Acc, camp_ids: &[B], channels: &[B]) -> io
     ];
     write_file(path, &cols, &Opts::default(), STREAM)?;
     Ok(())
+}

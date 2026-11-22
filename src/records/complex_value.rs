@@ -25,6 +25,7 @@ fn resolve_all(g: &G, t: &mut TState) {
         };
         cpush(t, pk, r.w0);
     }
+}
 
 const RANKF: u64 = 1 << 61;
 
@@ -65,6 +66,7 @@ pub fn clicks_a(g: &G, tid: usize) {
         t.cx_ck[shard(pk)].push([pk, c[1], c[2]]);
     }
     t.odd_clicks = odd;
+}
 
 #[derive(Default)]
 pub struct PScratch {
@@ -72,11 +74,13 @@ pub struct PScratch {
     cks: Vec<[u64; 3]>,
     dec: Vec<(u128, u64, [u64; 3])>,
     name: Vec<u8>,
+}
 
 pub fn shard_order(g: &G) -> Vec<usize> {
     let mut w: Vec<(usize, usize)> = (0..NSHARD).map(|s| ((0..g.nt).map(|th| g.t(th).cx_ev[s].len() + g.t(th).cx_ck[s].len()).sum(), s)).collect();
     w.sort_unstable_by(|a, b| b.cmp(a));
     w.into_iter().map(|x| x.1).collect()
+}
 
 fn persons_b(g: &G, tid: usize, order: &[usize]) {
     let mut sc = PScratch::default();
@@ -87,6 +91,7 @@ fn persons_b(g: &G, tid: usize, order: &[usize]) {
         }
         person_shard(g, tid, order[i], &mut sc);
     }
+}
 
 pub fn person_shard(g: &G, tid: usize, s: usize, sc: &mut PScratch) {
     let t = g.t(tid);
@@ -137,6 +142,7 @@ pub fn person_shard(g: &G, tid: usize, s: usize, sc: &mut PScratch) {
             i = i2;
         }
     }
+}
 
 pub fn stage4(g: &mut G) {
     stage4_pre(g);
@@ -153,6 +159,7 @@ pub fn stage4(g: &mut G) {
         let o = &order;
         sys::run_par(gr.nt, |tid| persons_b(gr, tid, o));
     }
+}
 
 pub fn stage4_pre(g: &mut G) {
     let users: Vec<u32> = g.extra.keys().copied().collect();
@@ -183,3 +190,4 @@ pub fn stage4_pre(g: &mut G) {
     }
     g.cxu = cxu;
     crate::sys::lap("c.pre");
+}

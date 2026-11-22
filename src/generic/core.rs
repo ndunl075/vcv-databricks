@@ -7,6 +7,7 @@ pub struct LinkMap<'a> {
     ids: Vec<B<'a>>,
     hashes: Vec<u64>,
     name_of: Vec<u32>,
+}
 
 impl<'a> LinkMap<'a> {
     #[inline]
@@ -19,6 +20,7 @@ impl<'a> LinkMap<'a> {
             Err(_) => (user, h),
         }
     }
+}
 
 fn find(parent: &mut [u32], mut x: u32) -> u32 {
     let mut r = x;
@@ -31,6 +33,7 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
         x = n;
     }
     r
+}
 
 pub type LinkPart<'a> = Vec<(B<'a>, u64, B<'a>, u64)>;
 
@@ -44,6 +47,7 @@ pub fn parse_links(c: B<'_>) -> LinkPart<'_> {
         }
     });
     v
+}
 
 pub fn build_links<'a>(parts: &[LinkPart<'a>]) -> LinkMap<'a> {
     let n: usize = parts.iter().map(|p| p.len()).sum();
@@ -91,6 +95,7 @@ pub fn build_links<'a>(parts: &[LinkPart<'a>]) -> LinkMap<'a> {
     }
     let name_of: Vec<u32> = roots.iter().map(|&r| min_of[r as usize]).collect();
     LinkMap { tab, ids, hashes, name_of }
+}
 
 
 pub const T_VIEW: u32 = 0;
@@ -105,6 +110,7 @@ pub struct Ev<'a> {
     pub ts: i64,
     pub pt: u32,
     pub cat: u32,
+}
 impl<'a> Ev<'a> {
     #[inline]
     fn eid(&self) -> B<'a> {
@@ -114,6 +120,7 @@ impl<'a> Ev<'a> {
     fn user(&self) -> B<'a> {
         unsafe { first_two(self.line).1 }
     }
+}
 
 #[derive(Clone, Copy)]
 pub struct Rec<'a> {
@@ -122,14 +129,17 @@ pub struct Rec<'a> {
     pub ts: i64,
     pub pt: u32,
     pub cat: u32,
+}
 
 pub struct Parts<T> {
     pub items: Vec<T>,
     pub off: Vec<u32>,
+}
 impl<T> Default for Parts<T> {
     fn default() -> Self {
         Parts { items: Vec::new(), off: Vec::new() }
     }
+}
 impl<T: Copy> Parts<T> {
     fn group(tmp: &[(T, u32)], nshard: usize) -> Parts<T> {
         let mut off = vec![0u32; nshard + 1];
@@ -158,16 +168,19 @@ impl<T: Copy> Parts<T> {
         }
         &self.items[self.off[s] as usize..self.off[s + 1] as usize]
     }
+}
 
 pub struct EvCtx<'m, 'a> {
     pub ws: i64,
     pub we: i64,
     pub products: &'m Map<B<'a>, u32>,
     pub unknown_cat: u32,
+}
 
 #[inline]
 pub fn shard_of(h: u64, nshard: usize) -> usize {
     ((h >> 32) as usize) & (nshard - 1)
+}
 
 pub fn parse_events<'a>(c: B<'a>, ctx: &EvCtx<'_, 'a>, nshard: usize, tmp: &mut Vec<(Ev<'a>, u32)>) -> Parts<Ev<'a>> {
     tmp.clear();
@@ -208,6 +221,7 @@ pub fn parse_events<'a>(c: B<'a>, ctx: &EvCtx<'_, 'a>, nshard: usize, tmp: &mut 
         tmp.push((e, shard_of(h, nshard) as u32));
     });
     Parts::group(tmp, nshard)
+}
 
 #[derive(Default)]
 pub struct DedupBufs<'a> {
@@ -215,6 +229,7 @@ pub struct DedupBufs<'a> {
     base: Vec<u32>,
     win: Vec<bool>,
     tmp: Vec<(Rec<'a>, u32)>,
+}
 
 pub fn dedup_route<'a>(parts: &[Parts<Ev<'a>>], s: usize, links: &LinkMap<'a>, npshard: usize, b: &mut DedupBufs<'a>) -> Parts<Rec<'a>> {
     b.base.clear();
@@ -271,6 +286,7 @@ pub fn dedup_route<'a>(parts: &[Parts<Ev<'a>>], s: usize, links: &LinkMap<'a>, n
         }
     }
     Parts::group(&b.tmp, npshard)
+}
 
 
 #[derive(Clone, Copy)]
@@ -278,6 +294,7 @@ pub struct Ck0<'a> {
     pub line: &'a u8,
     pub ts: i64,
     pub camp: u32,
+}
 
 #[derive(Clone, Copy)]
 pub struct Ck<'a> {
@@ -286,6 +303,7 @@ pub struct Ck<'a> {
     pub line: &'a u8,
     pub ts: i64,
     pub camp: u32,
+}
 
 pub fn parse_clicks<'a>(c: B<'a>, ws: i64, we: i64, campaigns: &Map<B<'a>, u32>) -> Vec<Ck0<'a>> {
     let lo = ws - 7 * DAY_MS;
@@ -303,6 +321,7 @@ pub fn parse_clicks<'a>(c: B<'a>, ws: i64, we: i64, campaigns: &Map<B<'a>, u32>)
         v.push(Ck0 { line: &line[0], ts: t, camp: ci });
     });
     v
+}
 
 pub fn route_clicks<'a>(v: &[Ck0<'a>], links: &LinkMap<'a>, npshard: usize, tmp: &mut Vec<(Ck<'a>, u32)>) -> Parts<Ck<'a>> {
     tmp.clear();
@@ -312,6 +331,7 @@ pub fn route_clicks<'a>(v: &[Ck0<'a>], links: &LinkMap<'a>, npshard: usize, tmp:
         tmp.push((Ck { name, nh, line: c.line, ts: c.ts, camp: c.camp }, shard_of(nh, npshard) as u32));
     }
     Parts::group(tmp, npshard)
+}
 
 
 pub const GAP_MS: i64 = 1_800_000;
@@ -322,26 +342,31 @@ pub type Acc = Map<u64, [u64; 4]>;
 #[inline]
 pub fn key(camp: u32, day: i32) -> u64 {
     ((camp as u64) << 32) | (day as u32 as u64)
+}
 pub fn unkey(k: u64) -> (u32, i32) {
     ((k >> 32) as u32, k as u32 as i32)
+}
 
 #[derive(Clone, Copy)]
 pub struct PE {
     pub ts: i64,
     pub pt: u32,
     pub cat: u32,
+}
 
 #[derive(Clone, Copy)]
 pub struct PC<'a> {
     pub ts: i64,
     pub cid: B<'a>,
     pub camp: u32,
+}
 
 pub struct Sess {
     pub start: i64,
     pub day: i32,
     pub rev: u64,
     pub purch: bool,
+}
 
 pub struct UserRow<'a> {
     pub name: B<'a>,
@@ -350,6 +375,7 @@ pub struct UserRow<'a> {
     pub events: u64,
     pub revenue: u64,
     pub top: Option<u32>,
+}
 
 pub struct Scratch {
     sess: Vec<Sess>,
@@ -360,17 +386,20 @@ pub struct Scratch {
     touched: Vec<u32>,
     ct: Vec<(u32, i64)>,
     rs: Vec<u32>,
+}
 
 impl Scratch {
     pub fn new(ncat: usize) -> Self {
         Scratch { sess: vec![], starts: vec![], days: vec![], day_end: vec![], catsum: vec![0; ncat], touched: vec![], ct: vec![], rs: vec![] }
     }
+}
 
 struct DayAcc {
     day: i32,
     sessions: u64,
     events: u64,
     revenue: u64,
+}
 
 fn flush_row<'a>(name: B<'a>, d: &DayAcc, sc: &mut Scratch, rows: &mut Vec<UserRow<'a>>) {
     let mut top: Option<u32> = None;
@@ -385,6 +414,7 @@ fn flush_row<'a>(name: B<'a>, d: &DayAcc, sc: &mut Scratch, rows: &mut Vec<UserR
     }
     sc.touched.clear();
     rows.push(UserRow { name, day: d.day, sessions: d.sessions, events: d.events, revenue: d.revenue, top });
+}
 
 fn person<'a>(name: B<'a>, evs: &mut [PE], cks: &mut [PC<'a>], sc: &mut Scratch, rows: &mut Vec<UserRow<'a>>, organic: u32, acc: &mut Acc) {
     if evs.is_empty() {
@@ -442,6 +472,7 @@ fn person<'a>(name: B<'a>, evs: &mut [PE], cks: &mut [PC<'a>], sc: &mut Scratch,
         }
         assists(&sc.starts, &sc.days, &sc.day_end, cks, &mut sc.ct, acc);
     }
+}
 
 #[derive(Default)]
 pub struct ShardBufs<'a> {
@@ -454,6 +485,7 @@ pub struct ShardBufs<'a> {
     pid_ck: Vec<u32>,
     coff: Vec<u32>,
     pc: Vec<PC<'a>>,
+}
 
 pub fn run_shard<'a>(recs: &[Parts<Rec<'a>>], cks: &[Parts<Ck<'a>>], p: usize, organic: u32, sc: &mut Scratch, bf: &mut ShardBufs<'a>, acc: &mut Acc) -> Vec<UserRow<'a>> {
     let n_ev: usize = recs.iter().map(|r| r.shard(p).len()).sum();
@@ -543,6 +575,7 @@ pub fn run_shard<'a>(recs: &[Parts<Rec<'a>>], cks: &[Parts<Ck<'a>>], p: usize, o
         person(names[i], evs, cs, sc, &mut rows, organic, acc);
     }
     rows
+}
 
 
 fn credit(sess: &[Sess], cks: &[PC], rs: &mut Vec<u32>, organic: u32, acc: &mut Acc) {
@@ -570,6 +603,7 @@ fn credit(sess: &[Sess], cks: &[PC], rs: &mut Vec<u32>, organic: u32, acc: &mut 
         a[1] += s.purch as u64;
         a[2] += s.rev;
     }
+}
 
 fn assists(starts: &[i64], days: &[i32], day_end: &[u32], cks: &[PC], ct: &mut Vec<(u32, i64)>, acc: &mut Acc) {
     ct.clear();
@@ -598,3 +632,4 @@ fn assists(starts: &[i64], days: &[i32], day_end: &[u32], cks: &[PC], ct: &mut V
         }
         flush(camp, a, b);
     }
+}
