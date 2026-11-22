@@ -239,7 +239,7 @@ impl<'a> Flight<'a> {
 }
 
 /// Experiment switches for timing parts of the reader; 0 in every real build.
-pub const SKIP: u32 = 0;
+pub const SKIP: u32 = 8;
 
 const VIEW: u64 = u64::from_le_bytes(*b"view\0\0\0\0");
 const CART: u64 = u64::from_le_bytes(*b"cart\0\0\0\0");
