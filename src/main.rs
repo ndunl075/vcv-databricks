@@ -20,9 +20,9 @@ mod util;
 
 use acc::CampAcc;
 use buckets::Buckets;
-use input::{csv_files, make_tasks, map_file, Task};
+use input::{list_csv, open_view, plan_slices, Slice};
 use links::{LinkRec, LinkTable};
-use parquet::{Col, StrCol};
+use parquet::{ColumnView, TextColumn};
 use rec::*;
 use sessions::{Out, Scratch, UserCols};
 use std::path::{Path, PathBuf};
@@ -75,8 +75,8 @@ fn run() -> Result<(), String> {
 
     let map_all = |sub: &str| -> Result<Vec<&'static [u8]>, String> {
         let mut v = Vec::new();
-        for p in csv_files(&data_dir.join(sub)).map_err(io)? {
-            v.push(map_file(&p).map_err(|e| format!("{}: {e}", p.display()))?);
+        for p in list_csv(&data_dir.join(sub)).map_err(io)? {
+            v.push(open_view(&p).map_err(|e| format!("{}: {e}", p.display()))?);
         }
         Ok(v)
     };
@@ -90,7 +90,7 @@ fn run() -> Result<(), String> {
 
     // ---- Stage 1: links ----
     let chunk = ((ev_bytes + ck_bytes + lk_bytes) / (threads * 16)).clamp(256 << 10, 8 << 20);
-    let lk_tasks = make_tasks(&lk_files, chunk);
+    let lk_tasks = plan_slices(&lk_files, chunk);
     let next = AtomicUsize::new(0);
     let parts: Vec<Vec<LinkRec>> = par(threads, |_| {
         let mut v = Vec::new();
@@ -101,7 +101,7 @@ fn run() -> Result<(), String> {
             }
             let t = lk_tasks[i];
             let d = lk_files[t.file];
-            let (s, e) = t.range(d);
+            let (s, e) = t.rows(d);
             parse::parse_links(d, s, e, &mut v);
         }
         v
@@ -119,10 +119,10 @@ fn run() -> Result<(), String> {
     // ---- Stage 2: parse events and clicks ----
     struct Job {
         click: bool,
-        t: Task,
+        t: Slice,
     }
-    let mut jobs: Vec<Job> = make_tasks(&ev_files, chunk).into_iter().map(|t| Job { click: false, t }).collect();
-    jobs.extend(make_tasks(&ck_files, chunk).into_iter().map(|t| Job { click: true, t }));
+    let mut jobs: Vec<Job> = plan_slices(&ev_files, chunk).into_iter().map(|t| Job { click: false, t }).collect();
+    jobs.extend(plan_slices(&ck_files, chunk).into_iter().map(|t| Job { click: true, t }));
     let next = AtomicUsize::new(0);
     // The link table is built on its own thread while the others parse; nothing in this stage needs it.
     let (parsed, links): (Vec<(Vec<Buckets<Ev>>, Buckets<SClick>)>, LinkTable) = std::thread::scope(|sc| {
@@ -138,11 +138,11 @@ fn run() -> Result<(), String> {
                 let j = &jobs[i];
                 if j.click {
                     let d = ck_files[j.t.file];
-                    let (s, e) = j.t.range(d);
+                    let (s, e) = j.t.rows(d);
                     parse::parse_clicks(&cx, d, s, e, &mut cb);
                 } else {
                     let d = ev_files[j.t.file];
-                    let (s, e) = j.t.range(d);
+                    let (s, e) = j.t.rows(d);
                     parse::parse_events(&cx, d, s, e, &mut eb);
                 }
             }
@@ -269,10 +269,10 @@ fn run() -> Result<(), String> {
             return Ok(out.acc);
         }
         let path = user_dir.join(format!("part-{w:03}.parquet"));
-        parquet::write_file(
+        parquet::write_table(
             &path,
             &["user_id", "day", "sessions", "events", "revenue_cents", "top_category"],
-            &[Col::Str(&u.user), Col::Date(&u.day), Col::I64(&u.sessions), Col::I64(&u.events), Col::I64(&u.revenue), Col::OptStr(&u.top)],
+            &[ColumnView::Text(&u.user), ColumnView::Date(&u.day), ColumnView::Int64(&u.sessions), ColumnView::Int64(&u.events), ColumnView::Int64(&u.revenue), ColumnView::MaybeText(&u.top)],
         )
         .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(out.acc)
@@ -285,8 +285,8 @@ fn run() -> Result<(), String> {
     }
     let mut rows = total.rows();
     rows.sort_unstable_by_key(|r| (r.0, r.1));
-    let mut cid = StrCol::default();
-    let mut chan = StrCol::default();
+    let mut cid = TextColumn::default();
+    let mut chan = TextColumn::default();
     let mut day = Vec::new();
     let (mut c_s, mut c_p, mut c_r, mut c_a) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (camp, d, c) in &rows {
@@ -299,10 +299,10 @@ fn run() -> Result<(), String> {
         c_r.push(c[acc::REVENUE] as i64);
         c_a.push(c[acc::ASSISTED] as i64);
     }
-    parquet::write_file(
+    parquet::write_table(
         &camp_dir.join("part-000.parquet"),
         &["campaign_id", "channel", "day", "sessions", "purchasing_sessions", "revenue_cents", "assisted_sessions"],
-        &[Col::Str(&cid), Col::Str(&chan), Col::Date(&day), Col::I64(&c_s), Col::I64(&c_p), Col::I64(&c_r), Col::I64(&c_a)],
+        &[ColumnView::Text(&cid), ColumnView::Text(&chan), ColumnView::Date(&day), ColumnView::Int64(&c_s), ColumnView::Int64(&c_p), ColumnView::Int64(&c_r), ColumnView::Int64(&c_a)],
     )
     .map_err(io)?;
     lg!(t0, "done");

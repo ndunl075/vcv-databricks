@@ -1,142 +1,146 @@
-//! Input discovery, memory mapping and chunking.
+//! Finding input files, making them readable as byte slices, and splitting them into
+//! slices that start and end on row boundaries.
 
 use crate::util::find_byte;
-use std::ffi::c_void;
 use std::fs;
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-extern "C" {
-    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
-    fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
+mod os {
+    use std::ffi::c_void;
+    extern "C" {
+        #[link_name = "mmap"]
+        pub fn map_region(hint: *mut c_void, bytes: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut c_void;
+        #[link_name = "madvise"]
+        pub fn advise_region(start: *mut c_void, bytes: usize, advice: i32) -> i32;
+    }
+    pub const READABLE: i32 = 1;
+    pub const PRIVATE_COPY: i32 = 2;
+    pub const READ_AHEAD: i32 = 2;
 }
-const PROT_READ: i32 = 1;
-const MAP_PRIVATE: i32 = 2;
-const MADV_SEQUENTIAL: i32 = 2;
 
-/// Maps a whole file read-only for the life of the process. Empty file: empty slice.
-pub fn map_file(path: &Path) -> std::io::Result<&'static [u8]> {
-    let f = fs::File::open(path)?;
-    let len = f.metadata()?.len() as usize;
-    if len == 0 {
+/// The whole content of a file, valid until the process ends. An empty file gives an empty slice.
+pub fn open_view(path: &Path) -> std::io::Result<&'static [u8]> {
+    let file = fs::File::open(path)?;
+    let bytes = file.metadata()?.len() as usize;
+    if bytes == 0 {
         return Ok(&[]);
     }
+    // SAFETY: the mapping is private and read-only and is never unmapped.
     unsafe {
-        let p = mmap(std::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, f.as_raw_fd(), 0);
-        if p as isize == -1 {
+        let base = os::map_region(std::ptr::null_mut(), bytes, os::READABLE, os::PRIVATE_COPY, file.as_raw_fd(), 0);
+        if base as isize == -1 {
             return Err(std::io::Error::last_os_error());
         }
-        madvise(p, len, MADV_SEQUENTIAL);
-        Ok(std::slice::from_raw_parts(p as *const u8, len))
+        os::advise_region(base, bytes, os::READ_AHEAD);
+        Ok(std::slice::from_raw_parts(base as *const u8, bytes))
     }
 }
 
-/// Every `*.csv` file directly in `dir`, sorted by name. A missing directory is empty.
-pub fn csv_files(dir: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
-    let mut v = Vec::new();
-    let rd = match fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(v),
+/// Regular files named `*.csv` that sit directly in `dir`, in name order. No such directory: none.
+pub fn list_csv(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    for ent in rd {
-        let ent = ent?;
-        let name = ent.file_name();
-        if !name.to_string_lossy().ends_with(".csv") {
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_name().to_string_lossy().ends_with(".csv") {
             continue;
         }
-        let md = match fs::metadata(ent.path()) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if md.is_file() {
-            v.push(ent.path());
+        if fs::metadata(entry.path()).map(|m| m.is_file()).unwrap_or(false) {
+            found.push(entry.path());
         }
     }
-    v.sort();
-    Ok(v)
+    found.sort();
+    Ok(found)
 }
 
-/// First line start at or after `pos`.
-fn line_start_at(data: &[u8], pos: usize) -> usize {
-    if pos == 0 {
-        0
-    } else if pos >= data.len() {
-        data.len()
-    } else {
-        match find_byte(data, pos - 1, b'\n') {
-            Some(i) => i + 1,
-            None => data.len(),
-        }
+/// Offset just past the first line (the header, whatever it holds).
+pub fn first_row(data: &[u8]) -> usize {
+    find_byte(data, 0, b'\n').map_or(data.len(), |i| i + 1)
+}
+
+/// Start of the first data row at or after `pos`; `data.len()` if there is none.
+fn boundary(data: &[u8], pos: usize) -> usize {
+    let first = first_row(data);
+    if pos >= data.len() {
+        return data.len();
     }
+    let at = if pos == 0 { 0 } else { find_byte(data, pos - 1, b'\n').map_or(data.len(), |i| i + 1) };
+    at.max(first)
 }
 
-/// Start of the first data line (the header is the first line, whatever it holds).
-pub fn header_end(data: &[u8]) -> usize {
-    match find_byte(data, 0, b'\n') {
-        Some(i) => i + 1,
-        None => data.len(),
-    }
-}
-
-/// A nominal slice of a file; resolve it with `Task::range`.
+/// A piece of one file, given by nominal byte offsets; `rows` snaps both ends to row starts, so
+/// neighbouring pieces never share or split a row.
 #[derive(Clone, Copy)]
-pub struct Task {
+pub struct Slice {
     pub file: usize,
-    pub a: usize,
-    pub b: usize,
-    pub last: bool,
+    from: usize,
+    to: usize,
 }
 
-impl Task {
-    /// Exact line-aligned byte range of this task, never overlapping its neighbours.
-    pub fn range(&self, data: &[u8]) -> (usize, usize) {
-        let h = header_end(data);
-        let s = if self.a == 0 { h } else { line_start_at(data, self.a).max(h) };
-        let e = if self.last { data.len() } else { line_start_at(data, self.b).max(h) };
-        (s, e.max(s))
+impl Slice {
+    pub fn rows(&self, data: &[u8]) -> (usize, usize) {
+        let lo = boundary(data, self.from);
+        let hi = boundary(data, self.to);
+        (lo, hi.max(lo))
     }
 }
 
-pub fn make_tasks(files: &[&'static [u8]], chunk: usize) -> Vec<Task> {
-    let mut v = Vec::new();
-    for (fi, f) in files.iter().enumerate() {
-        let n = f.len().div_ceil(chunk).max(1);
-        for k in 0..n {
-            v.push(Task { file: fi, a: k * chunk, b: (k + 1) * chunk, last: k + 1 == n });
+/// Cuts every file into slices of about `piece` bytes.
+pub fn plan_slices(files: &[&[u8]], piece: usize) -> Vec<Slice> {
+    let mut plan = Vec::new();
+    for (file, data) in files.iter().enumerate() {
+        let count = data.len().div_ceil(piece).max(1);
+        for k in 0..count {
+            let to = if k + 1 == count { usize::MAX } else { (k + 1) * piece };
+            plan.push(Slice { file, from: k * piece, to });
         }
     }
-    v
+    plan
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn leak(b: &[u8]) -> &'static [u8] {
+        Box::leak(b.to_vec().into_boxed_slice())
+    }
+
     #[test]
-    fn chunks_partition_lines() {
-        let data: &'static [u8] = Box::leak(b"h1,h2\nl1\nline2\n\nlast".to_vec().into_boxed_slice());
-        for chunk in 1..=data.len() + 2 {
-            let tasks = make_tasks(&[data], chunk);
-            let mut lines = Vec::new();
-            for t in &tasks {
-                let (s, e) = t.range(data);
-                crate::csv::for_each_line(data, s, e, |l| lines.push(l.to_vec()));
+    fn slices_cover_each_row_once() {
+        let data = leak(b"h1,h2\nl1\nline2\n\nlast");
+        for piece in 1..=data.len() + 3 {
+            let mut seen = Vec::new();
+            for s in plan_slices(&[data], piece) {
+                let (lo, hi) = s.rows(data);
+                crate::csv::for_each_line(data, lo, hi, |l| seen.push(l.to_vec()));
             }
             let want: Vec<Vec<u8>> = vec![b"l1".to_vec(), b"line2".to_vec(), b"".to_vec(), b"last".to_vec()];
-            assert_eq!(lines, want, "chunk {chunk}");
+            assert_eq!(seen, want, "piece {piece}");
         }
     }
 
     #[test]
-    fn header_only_and_empty() {
-        for d in [&b"a,b\n"[..], &b"a,b"[..], &b""[..], &b"\n"[..]] {
-            for t in make_tasks(&[d], 3) {
-                let (s, e) = t.range(d);
+    fn no_data_rows() {
+        for data in [&b"a,b\n"[..], &b"a,b"[..], &b""[..], &b"\n"[..]] {
+            for s in plan_slices(&[data], 2) {
+                let (lo, hi) = s.rows(data);
                 let mut n = 0;
-                crate::csv::for_each_line(d, s, e, |_| n += 1);
+                crate::csv::for_each_line(data, lo, hi, |_| n += 1);
                 assert_eq!(n, 0);
             }
         }
+    }
+
+    #[test]
+    fn many_files_keep_their_index() {
+        let (a, b) = (leak(b"h\nx\ny\n"), leak(b"h\nz\n"));
+        let plan = plan_slices(&[a, b], 4);
+        assert!(plan.iter().any(|s| s.file == 0) && plan.iter().any(|s| s.file == 1));
     }
 }

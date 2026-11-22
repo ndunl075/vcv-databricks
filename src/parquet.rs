@@ -1,304 +1,288 @@
-//! Minimal Parquet writer: one row group, PLAIN encoding, no compression, data page v1.
+//! Output tables as Parquet files: a single row group, plain-encoded data pages, nothing compressed.
+//!
+//! Page bodies are assembled column by column; the footer is described as a small tree of values
+//! (`Tv`) that a generic routine turns into Thrift compact-protocol bytes.
 
 use std::io::Write;
 use std::path::Path;
 
-pub const PAGE_ROWS: usize = 1 << 16;
+/// Rows per data page.
+pub const ROWS_PER_PAGE: usize = 1 << 16;
 
-/// Strings stored as PLAIN BYTE_ARRAY (u32 length + bytes), with a page mark every PAGE_ROWS rows.
+/// Text values, each stored as a 4-byte little-endian length plus the bytes.
 #[derive(Default)]
-pub struct StrCol {
-    pub data: Vec<u8>,
-    marks: Vec<usize>,
-    pub n: usize,
+pub struct TextColumn {
+    bytes: Vec<u8>,
+    page_starts: Vec<usize>,
+    rows: usize,
 }
 
-impl StrCol {
+impl TextColumn {
     #[inline]
-    pub fn push(&mut self, s: &[u8]) {
-        if self.n % PAGE_ROWS == 0 {
-            self.marks.push(self.data.len());
+    pub fn push(&mut self, v: &[u8]) {
+        if self.rows % ROWS_PER_PAGE == 0 {
+            self.page_starts.push(self.bytes.len());
         }
-        self.data.extend_from_slice(&(s.len() as u32).to_le_bytes());
-        self.data.extend_from_slice(s);
-        self.n += 1;
+        self.bytes.extend_from_slice(&(v.len() as u32).to_le_bytes());
+        self.bytes.extend_from_slice(v);
+        self.rows += 1;
     }
 }
 
-/// Nullable string column: definition levels per row, values only for non-null rows.
+/// Text values that may be null: a presence flag per row, bytes only for present values.
 #[derive(Default)]
-pub struct OptStrCol {
-    pub data: Vec<u8>,
-    marks: Vec<usize>,
-    pub def: Vec<u8>,
+pub struct MaybeTextColumn {
+    bytes: Vec<u8>,
+    page_starts: Vec<usize>,
+    present: Vec<u8>,
 }
 
-impl OptStrCol {
+impl MaybeTextColumn {
     #[inline]
-    pub fn push(&mut self, s: Option<&[u8]>) {
-        if self.def.len() % PAGE_ROWS == 0 {
-            self.marks.push(self.data.len());
+    pub fn push(&mut self, v: Option<&[u8]>) {
+        if self.present.len() % ROWS_PER_PAGE == 0 {
+            self.page_starts.push(self.bytes.len());
         }
-        match s {
-            Some(s) => {
-                self.def.push(1);
-                self.data.extend_from_slice(&(s.len() as u32).to_le_bytes());
-                self.data.extend_from_slice(s);
-            }
-            None => self.def.push(0),
+        self.present.push(v.is_some() as u8);
+        if let Some(v) = v {
+            self.bytes.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            self.bytes.extend_from_slice(v);
         }
     }
 }
 
-pub enum Col<'a> {
-    I64(&'a [i64]),
+/// One column of a table, borrowed from the builder that owns the values.
+pub enum ColumnView<'a> {
+    Int64(&'a [i64]),
     Date(&'a [i32]),
-    Str(&'a StrCol),
-    OptStr(&'a OptStrCol),
+    Text(&'a TextColumn),
+    MaybeText(&'a MaybeTextColumn),
 }
 
-impl Col<'_> {
-    fn rows(&self) -> usize {
+impl ColumnView<'_> {
+    fn len(&self) -> usize {
         match self {
-            Col::I64(v) => v.len(),
-            Col::Date(v) => v.len(),
-            Col::Str(c) => c.n,
-            Col::OptStr(c) => c.def.len(),
+            ColumnView::Int64(v) => v.len(),
+            ColumnView::Date(v) => v.len(),
+            ColumnView::Text(c) => c.rows,
+            ColumnView::MaybeText(c) => c.present.len(),
         }
     }
-}
 
-// ---- Thrift compact protocol ----
-
-struct Tw {
-    b: Vec<u8>,
-    last: Vec<i16>,
-}
-
-const T_I32: u8 = 5;
-const T_I64: u8 = 6;
-const T_BIN: u8 = 8;
-const T_LIST: u8 = 9;
-const T_STRUCT: u8 = 12;
-
-impl Tw {
-    fn new() -> Tw {
-        Tw { b: Vec::new(), last: vec![0] }
-    }
-    fn varint(&mut self, mut v: u64) {
-        while v >= 0x80 {
-            self.b.push((v as u8) | 0x80);
-            v >>= 7;
-        }
-        self.b.push(v as u8);
-    }
-    fn zz(&mut self, v: i64) {
-        self.varint(((v << 1) ^ (v >> 63)) as u64);
-    }
-    fn field(&mut self, id: i16, ty: u8) {
-        let l = *self.last.last().unwrap();
-        let d = id - l;
-        if d > 0 && d <= 15 {
-            self.b.push(((d as u8) << 4) | ty);
-        } else {
-            self.b.push(ty);
-            self.zz(id as i64);
-        }
-        *self.last.last_mut().unwrap() = id;
-    }
-    fn i32(&mut self, id: i16, v: i32) {
-        self.field(id, T_I32);
-        self.zz(v as i64);
-    }
-    fn i64(&mut self, id: i16, v: i64) {
-        self.field(id, T_I64);
-        self.zz(v);
-    }
-    fn string(&mut self, id: i16, s: &str) {
-        self.field(id, T_BIN);
-        self.varint(s.len() as u64);
-        self.b.extend_from_slice(s.as_bytes());
-    }
-    /// Starts a struct-valued field.
-    fn begin(&mut self, id: i16) {
-        self.field(id, T_STRUCT);
-        self.last.push(0);
-    }
-    /// Ends a struct (field-valued or list element).
-    fn end(&mut self) {
-        self.b.push(0);
-        self.last.pop();
-    }
-    fn list(&mut self, id: i16, elem: u8, n: usize) {
-        self.field(id, T_LIST);
-        if n < 15 {
-            self.b.push(((n as u8) << 4) | elem);
-        } else {
-            self.b.push(0xF0 | elem);
-            self.varint(n as u64);
+    /// Parquet physical type number.
+    fn physical(&self) -> i32 {
+        match self {
+            ColumnView::Int64(_) => 2,
+            ColumnView::Date(_) => 1,
+            _ => 6,
         }
     }
-    /// Struct element inside a list.
-    fn begin_elem(&mut self) {
-        self.last.push(0);
-    }
-    fn str_elem(&mut self, s: &str) {
-        self.varint(s.len() as u64);
-        self.b.extend_from_slice(s.as_bytes());
-    }
-    fn i32_elem(&mut self, v: i32) {
-        self.zz(v as i64);
-    }
-}
 
-fn type_of(c: &Col) -> i32 {
-    match c {
-        Col::I64(_) => 2,
-        Col::Date(_) => 1,
-        _ => 6,
+    fn nullable(&self) -> bool {
+        matches!(self, ColumnView::MaybeText(_))
     }
-}
 
-fn page_header(num_values: usize, body: usize) -> Vec<u8> {
-    let mut t = Tw::new();
-    t.i32(1, 0);
-    t.i32(2, body as i32);
-    t.i32(3, body as i32);
-    t.begin(5);
-    t.i32(1, num_values as i32);
-    t.i32(2, 0);
-    t.i32(3, 3);
-    t.i32(4, 3);
-    t.end();
-    t.b.push(0);
-    t.b
-}
-
-fn page_slice<'a>(data: &'a [u8], marks: &[usize], p: usize) -> &'a [u8] {
-    let a = marks[p];
-    let b = if p + 1 < marks.len() { marks[p + 1] } else { data.len() };
-    &data[a..b]
-}
-
-/// Writes one file. `names[i]` names column `cols[i]`.
-pub fn write_file(path: &Path, names: &[&str], cols: &[Col]) -> std::io::Result<()> {
-    let nrows = cols.first().map_or(0, |c| c.rows());
-    let mut out: Vec<u8> = Vec::new();
-    out.extend_from_slice(b"PAR1");
-    let mut chunks: Vec<(i64, i64)> = Vec::new(); // (offset, size)
-    if nrows > 0 {
-        for c in cols {
-            let start = out.len();
-            let npages = nrows.div_ceil(PAGE_ROWS);
-            for p in 0..npages {
-                let r0 = p * PAGE_ROWS;
-                let r1 = ((p + 1) * PAGE_ROWS).min(nrows);
-                let nv = r1 - r0;
-                let mut body: Vec<u8> = Vec::new();
-                match c {
-                    Col::I64(v) => {
-                        body.reserve(nv * 8);
-                        for x in &v[r0..r1] {
-                            body.extend_from_slice(&x.to_le_bytes());
-                        }
-                    }
-                    Col::Date(v) => {
-                        body.reserve(nv * 4);
-                        for x in &v[r0..r1] {
-                            body.extend_from_slice(&x.to_le_bytes());
-                        }
-                    }
-                    Col::Str(s) => body.extend_from_slice(page_slice(&s.data, &s.marks, p)),
-                    Col::OptStr(s) => {
-                        let groups = nv.div_ceil(8);
-                        let mut lv = vec![0u8; groups];
-                        for (i, &d) in s.def[r0..r1].iter().enumerate() {
-                            lv[i >> 3] |= d << (i & 7);
-                        }
-                        let mut t = Tw::new();
-                        t.varint(((groups as u64) << 1) | 1);
-                        t.b.extend_from_slice(&lv);
-                        body.extend_from_slice(&(t.b.len() as u32).to_le_bytes());
-                        body.extend_from_slice(&t.b);
-                        body.extend_from_slice(page_slice(&s.data, &s.marks, p));
-                    }
+    /// Body of data page `p` (definition levels first when nullable).
+    fn page_body(&self, p: usize, lo: usize, hi: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self {
+            ColumnView::Int64(v) => v[lo..hi].iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
+            ColumnView::Date(v) => v[lo..hi].iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes())),
+            ColumnView::Text(c) => out.extend_from_slice(slice_of_page(&c.bytes, &c.page_starts, p)),
+            ColumnView::MaybeText(c) => {
+                // Definition levels: one bit-packed run of 1-bit values.
+                let groups = (hi - lo).div_ceil(8);
+                let mut packed = vec![0u8; groups];
+                for (k, &flag) in c.present[lo..hi].iter().enumerate() {
+                    packed[k / 8] |= flag << (k % 8);
                 }
-                out.extend_from_slice(&page_header(nv, body.len()));
-                out.extend_from_slice(&body);
+                let mut levels = Vec::new();
+                put_varint(&mut levels, ((groups as u64) << 1) | 1);
+                levels.extend_from_slice(&packed);
+                out.extend_from_slice(&(levels.len() as u32).to_le_bytes());
+                out.extend_from_slice(&levels);
+                out.extend_from_slice(slice_of_page(&c.bytes, &c.page_starts, p));
             }
-            chunks.push((start as i64, (out.len() - start) as i64));
         }
+        out
     }
-    // Footer: FileMetaData.
-    let mut t = Tw::new();
-    t.i32(1, 1);
-    t.list(2, T_STRUCT, cols.len() + 1);
-    t.begin_elem();
-    t.string(4, "schema");
-    t.i32(5, cols.len() as i32);
-    t.end();
-    for (i, c) in cols.iter().enumerate() {
-        t.begin_elem();
-        t.i32(1, type_of(c));
-        t.i32(3, if matches!(c, Col::OptStr(_)) { 1 } else { 0 });
-        t.string(4, names[i]);
-        match c {
-            Col::Str(_) | Col::OptStr(_) => {
-                t.i32(6, 0);
-                t.begin(10);
-                t.begin(1);
-                t.end();
-                t.end();
-            }
-            Col::Date(_) => {
-                t.i32(6, 6);
-                t.begin(10);
-                t.begin(6);
-                t.end();
-                t.end();
-            }
-            _ => {}
+}
+
+fn slice_of_page<'a>(bytes: &'a [u8], starts: &[usize], p: usize) -> &'a [u8] {
+    let from = starts[p];
+    let to = starts.get(p + 1).copied().unwrap_or(bytes.len());
+    &bytes[from..to]
+}
+
+// ---------------------------------------------------------------------------------------------
+// Thrift compact protocol, driven by a value tree.
+
+/// A Thrift value.
+enum Tv {
+    I32(i32),
+    I64(i64),
+    Text(String),
+    Struct(Vec<(i16, Tv)>),
+    I32s(Vec<i32>),
+    Texts(Vec<String>),
+    Structs(Vec<Vec<(i16, Tv)>>),
+}
+
+fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let low = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(low);
+            return;
         }
-        t.end();
+        out.push(low | 0x80);
     }
-    t.i64(3, nrows as i64);
-    if nrows > 0 {
-        t.list(4, T_STRUCT, 1);
-        t.begin_elem();
-        t.list(1, T_STRUCT, cols.len());
-        for (i, c) in cols.iter().enumerate() {
-            let (off, size) = chunks[i];
-            t.begin_elem();
-            t.i64(2, off);
-            t.begin(3);
-            t.i32(1, type_of(c));
-            t.list(2, T_I32, 2);
-            t.i32_elem(0);
-            t.i32_elem(3);
-            t.list(3, T_BIN, 1);
-            t.str_elem(names[i]);
-            t.i32(4, 0);
-            t.i64(5, nrows as i64);
-            t.i64(6, size);
-            t.i64(7, size);
-            t.i64(9, off);
-            t.end();
-            t.end();
-        }
-        let total: i64 = chunks.iter().map(|c| c.1).sum();
-        t.i64(2, total);
-        t.i64(3, nrows as i64);
-        t.end();
+}
+
+fn put_zigzag(out: &mut Vec<u8>, v: i64) {
+    put_varint(out, ((v << 1) ^ (v >> 63)) as u64);
+}
+
+fn wire_type(v: &Tv) -> u8 {
+    match v {
+        Tv::I32(_) => 5,
+        Tv::I64(_) => 6,
+        Tv::Text(_) => 8,
+        Tv::I32s(_) | Tv::Texts(_) | Tv::Structs(_) => 9,
+        Tv::Struct(_) => 12,
+    }
+}
+
+fn put_list_head(out: &mut Vec<u8>, count: usize, elem: u8) {
+    if count < 15 {
+        out.push(((count as u8) << 4) | elem);
     } else {
-        t.list(4, T_STRUCT, 0);
+        out.push(0xf0 | elem);
+        put_varint(out, count as u64);
     }
-    t.string(6, "shopping-sessions");
-    t.b.push(0);
-    let meta = t.b;
-    out.extend_from_slice(&meta);
-    out.extend_from_slice(&(meta.len() as u32).to_le_bytes());
-    out.extend_from_slice(b"PAR1");
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(&out)?;
-    Ok(())
+}
+
+fn put_struct(out: &mut Vec<u8>, fields: &[(i16, Tv)]) {
+    let mut prev = 0i16;
+    for (id, v) in fields {
+        let delta = id - prev;
+        let t = wire_type(v);
+        if (1..=15).contains(&delta) {
+            out.push(((delta as u8) << 4) | t);
+        } else {
+            out.push(t);
+            put_zigzag(out, *id as i64);
+        }
+        prev = *id;
+        match v {
+            Tv::I32(x) => put_zigzag(out, *x as i64),
+            Tv::I64(x) => put_zigzag(out, *x),
+            Tv::Text(s) => {
+                put_varint(out, s.len() as u64);
+                out.extend_from_slice(s.as_bytes());
+            }
+            Tv::Struct(inner) => put_struct(out, inner),
+            Tv::I32s(xs) => {
+                put_list_head(out, xs.len(), 5);
+                xs.iter().for_each(|x| put_zigzag(out, *x as i64));
+            }
+            Tv::Texts(ss) => {
+                put_list_head(out, ss.len(), 8);
+                for s in ss {
+                    put_varint(out, s.len() as u64);
+                    out.extend_from_slice(s.as_bytes());
+                }
+            }
+            Tv::Structs(items) => {
+                put_list_head(out, items.len(), 12);
+                items.iter().for_each(|f| put_struct(out, f));
+            }
+        }
+    }
+    out.push(0);
+}
+
+fn page_header(values: usize, body_len: usize) -> Vec<u8> {
+    let header = vec![
+        (1, Tv::I32(0)),
+        (2, Tv::I32(body_len as i32)),
+        (3, Tv::I32(body_len as i32)),
+        (5, Tv::Struct(vec![(1, Tv::I32(values as i32)), (2, Tv::I32(0)), (3, Tv::I32(3)), (4, Tv::I32(3))])),
+    ];
+    let mut out = Vec::new();
+    put_struct(&mut out, &header);
+    out
+}
+
+fn schema_entry(name: &str, col: &ColumnView) -> Vec<(i16, Tv)> {
+    let mut e = vec![(1, Tv::I32(col.physical())), (3, Tv::I32(col.nullable() as i32)), (4, Tv::Text(name.to_string()))];
+    match col {
+        ColumnView::Text(_) | ColumnView::MaybeText(_) => {
+            e.push((6, Tv::I32(0)));
+            e.push((10, Tv::Struct(vec![(1, Tv::Struct(vec![]))])));
+        }
+        ColumnView::Date(_) => {
+            e.push((6, Tv::I32(6)));
+            e.push((10, Tv::Struct(vec![(6, Tv::Struct(vec![]))])));
+        }
+        ColumnView::Int64(_) => {}
+    }
+    e
+}
+
+fn chunk_entry(name: &str, col: &ColumnView, rows: usize, offset: i64, size: i64) -> Vec<(i16, Tv)> {
+    let meta = vec![
+        (1, Tv::I32(col.physical())),
+        (2, Tv::I32s(vec![0, 3])),
+        (3, Tv::Texts(vec![name.to_string()])),
+        (4, Tv::I32(0)),
+        (5, Tv::I64(rows as i64)),
+        (6, Tv::I64(size)),
+        (7, Tv::I64(size)),
+        (9, Tv::I64(offset)),
+    ];
+    vec![(2, Tv::I64(offset)), (3, Tv::Struct(meta))]
+}
+
+/// Writes `columns` (named by `names`) as one Parquet file at `path`.
+pub fn write_table(path: &Path, names: &[&str], columns: &[ColumnView]) -> std::io::Result<()> {
+    let rows = columns.first().map_or(0, |c| c.len());
+    let mut file: Vec<u8> = b"PAR1".to_vec();
+    let mut placed: Vec<(i64, i64)> = Vec::new();
+    if rows > 0 {
+        for col in columns {
+            let begin = file.len();
+            for (p, lo) in (0..rows).step_by(ROWS_PER_PAGE).enumerate() {
+                let hi = (lo + ROWS_PER_PAGE).min(rows);
+                let body = col.page_body(p, lo, hi);
+                file.extend_from_slice(&page_header(hi - lo, body.len()));
+                file.extend_from_slice(&body);
+            }
+            placed.push((begin as i64, (file.len() - begin) as i64));
+        }
+    }
+
+    let mut schema = vec![vec![(4, Tv::Text("schema".to_string())), (5, Tv::I32(columns.len() as i32))]];
+    schema.extend(columns.iter().zip(names).map(|(c, n)| schema_entry(n, c)));
+    let groups = if rows > 0 {
+        let chunks: Vec<_> = columns.iter().zip(names).zip(&placed).map(|((c, n), &(o, s))| chunk_entry(n, c, rows, o, s)).collect();
+        let total: i64 = placed.iter().map(|p| p.1).sum();
+        vec![vec![(1, Tv::Structs(chunks)), (2, Tv::I64(total)), (3, Tv::I64(rows as i64))]]
+    } else {
+        vec![]
+    };
+    let footer_tree = vec![
+        (1, Tv::I32(1)),
+        (2, Tv::Structs(schema)),
+        (3, Tv::I64(rows as i64)),
+        (4, Tv::Structs(groups)),
+        (6, Tv::Text("shopping-sessions".to_string())),
+    ];
+    let mut footer = Vec::new();
+    put_struct(&mut footer, &footer_tree);
+    file.extend_from_slice(&footer);
+    file.extend_from_slice(&(footer.len() as u32).to_le_bytes());
+    file.extend_from_slice(b"PAR1");
+    std::fs::File::create(path)?.write_all(&file)
 }

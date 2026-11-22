@@ -4,7 +4,7 @@ use crate::buckets::Buckets;
 use crate::csv::{for_each_line, split};
 use crate::links::{IdRef, LinkRec};
 use crate::rec::*;
-use crate::ts::{parse_price, parse_ts};
+use crate::ts::{price_cents, epoch_ms};
 use crate::util::{hash128, DAY_MS};
 
 /// Parses event lines of one chunk into per-eshard buckets.
@@ -20,8 +20,8 @@ pub fn parse_events(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: 
         }
         let eh = hash128(eid).0;
         let user = &line[f[1].0..f[1].1];
-        let ts = parse_ts(&line[f[2].0..f[2].1]);
-        let ing = parse_ts(&line[f[3].0..f[3].1]);
+        let ts = epoch_ms(&line[f[2].0..f[2].1]);
+        let ing = epoch_ms(&line[f[3].0..f[3].1]);
         let ty = &line[f[4].0..f[4].1];
         let prod = &line[f[5].0..f[5].1];
 
@@ -44,7 +44,7 @@ pub fn parse_events(cx: &Ctx, data: &'static [u8], s: usize, e: usize, buckets: 
         let mut cat = 0u32;
         match ty {
             b"view" | b"cart" => {}
-            b"purchase" => match parse_price(&line[f[6].0..f[6].1]) {
+            b"purchase" => match price_cents(&line[f[6].0..f[6].1]) {
                 Some(p) => {
                     price = p;
                     cat = match cx.prods.map.get(prod) {
@@ -92,7 +92,7 @@ pub fn parse_clicks(cx: &Ctx, data: &'static [u8], s: usize, e: usize, out: &mut
         if cid.is_empty() || user.is_empty() {
             return;
         }
-        let ts = match parse_ts(&line[f[3].0..f[3].1]) {
+        let ts = match epoch_ms(&line[f[3].0..f[3].1]) {
             Some(t) if t >= cx.win.cws && t < cx.win.we => t,
             _ => return,
         };

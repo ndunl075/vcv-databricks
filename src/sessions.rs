@@ -1,7 +1,7 @@
 //! Per-person sessionization, attribution and aggregation (one person-shard at a time).
 
 use crate::acc::CampAcc;
-use crate::parquet::{OptStrCol, StrCol};
+use crate::parquet::{MaybeTextColumn, TextColumn};
 use crate::rec::*;
 use crate::util::{field_at, floor_div, DAY_MS, GAP_MS, WEEK_MS};
 use std::cmp::Ordering;
@@ -9,12 +9,12 @@ use std::cmp::Ordering;
 /// user_daily rows built by one worker, column by column.
 #[derive(Default)]
 pub struct UserCols {
-    pub user: StrCol,
+    pub user: TextColumn,
     pub day: Vec<i32>,
     pub sessions: Vec<i64>,
     pub events: Vec<i64>,
     pub revenue: Vec<i64>,
-    pub top: OptStrCol,
+    pub top: MaybeTextColumn,
 }
 
 #[derive(Default)]
