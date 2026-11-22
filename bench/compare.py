@@ -122,6 +122,7 @@ def main():
     as_json = "--json" in sys.argv
     out_dir, expected = argv
     con = duckdb.connect()
+    con.execute("SET threads=2")
     result = {"ok": False, "missing": 0, "extra": 0, "differing": 0, "tables": {}, "error": None}
     try:
         for table in SCHEMAS:

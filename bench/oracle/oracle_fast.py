@@ -88,7 +88,7 @@ def run(data, out, work=None):
     os.makedirs(work)
     jobs_e = [(p, os.path.join(work, f"e{i}.parquet"), ws, we) for i, p in enumerate(csv_files(os.path.join(data, "events")))]
     jobs_c = [(p, os.path.join(work, f"c{i}.parquet"), ws, we) for i, p in enumerate(csv_files(os.path.join(data, "clicks")))]
-    with mp.get_context("fork").Pool(min(10, os.cpu_count() or 1)) as pool:
+    with mp.get_context("fork").Pool(int(os.environ.get("ORACLE_WORKERS", "3"))) as pool:
         # biggest first so the pool stays busy
         jobs_e.sort(key=lambda j: -os.path.getsize(j[0]))
         jobs_c.sort(key=lambda j: -os.path.getsize(j[0]))
@@ -108,7 +108,7 @@ def run(data, out, work=None):
                    os.path.join(work, "campaigns.parquet"))
 
     con = duckdb.connect()
-    con.execute(f"SET temp_directory='{work}/spill'; SET preserve_insertion_order=false; SET memory_limit='13GB';")
+    con.execute(f"SET temp_directory='{work}/spill'; SET preserve_insertion_order=false; SET memory_limit='13GB'; SET threads={os.environ.get('ORACLE_THREADS', '4')};")
     lst = lambda fs: "[" + ", ".join("'" + f.replace("'", "''") + "'" for f in fs) + "]"
     con.execute(f"CREATE VIEW raw_events AS SELECT * FROM read_parquet({lst(ev_files)})")
     con.execute(f"CREATE VIEW raw_clicks AS SELECT * FROM read_parquet({lst(ck_files)})")

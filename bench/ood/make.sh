@@ -19,7 +19,7 @@ for size in "${SIZES[@]}"; do
     name=ood-$v-$size
     if [ ! -f "$DATA_ROOT/$name/.done" ]; then
       echo "[ood] making $name"
-      python3 "$BENCH_DIR/ood/mutate.py" --base "$(base_of $size)" --variant "$v" --out "$DATA_ROOT/$name" --workers 8 \
+      lockf "${LOCK:-$HOME/Developer/vcv-rivals/bench.lock}" nice -n 10 python3 "$BENCH_DIR/ood/mutate.py" --base "$(base_of $size)" --variant "$v" --out "$DATA_ROOT/$name" --workers 4 \
         || { echo "[ood] $name FAILED"; continue; }
     fi
     if [ $EXPECTED = 1 ]; then "$BENCH_DIR/expected.sh" "$name" fast || true; fi

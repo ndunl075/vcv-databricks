@@ -10,12 +10,13 @@ import time
 
 data, out, scratch, image, name, timeout = sys.argv[1:7]
 log = os.environ.get("LOG", os.devnull)
+cpus = os.environ.get("CPUS", "4")
 cmd = ["docker", "run", "--name", name, "--platform", "linux/amd64", "--network", "none", "--read-only",
        "--tmpfs", "/tmp:rw,size=64m,mode=1777", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-       "--pids-limit", "4096", "--cpus", "8", "--memory", "18g", "--memory-swap", "18g", "--user", "1000:1000",
+       "--pids-limit", "4096", "--cpus", cpus, "--memory", "18g", "--memory-swap", "18g", "--user", "1000:1000",
        "-v", f"{data}:/data:ro", "-v", f"{out}:/output", "-v", f"{scratch}:/scratch",
        "-e", "DATA_DIR=/data", "-e", "OUTPUT_DIR=/output", "-e", "SCRATCH_DIR=/scratch", "-e", "HOME=/scratch",
-       "-e", "NCPU=8", "-e", "MEM_GB=24", image]
+       "-e", f"NCPU={cpus}", "-e", "MEM_GB=24", image]
 timed_out = False
 with open(log, "wb") as fh:
     t0 = time.monotonic()
@@ -36,4 +37,4 @@ try:
 except Exception:
     pass
 subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-print(json.dumps({"wall_s": round(wall, 3), "exit": code, "oom": oom, "timed_out": timed_out}))
+print(json.dumps({"cpus": int(cpus), "wall_s": round(wall, 3), "exit": code, "oom": oom, "timed_out": timed_out}))
