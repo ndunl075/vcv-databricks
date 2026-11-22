@@ -6,9 +6,8 @@
 //! shard's blocks, through a small per-shard buffer so each write is a full cache line, and
 //! lists the dedup suspects; the suspects that survive dedup are dealt the same way afterwards.
 
-use crate::dedup::{group_of, Suspect, GROUPS};
 use crate::os;
-use crate::parse::{Cells, Ck, Ev, Run, NOBODY};
+use crate::parse::{Ck, Ev, Run};
 
 /// A dealt row: two words (see `deal_events` and `deal_clicks`).
 pub type Row = [u64; 2];
@@ -214,15 +213,14 @@ impl Dealt {
 pub struct Hand {
     pub events: Dealer,
     pub clicks: Dealer,
-    pub suspects: Vec<Vec<Suspect>>,
 }
 
 // SAFETY: a hand is used by one thread at a time.
 unsafe impl Send for Hand {}
 
 impl Hand {
-    pub fn new(shards: usize, expected_suspects: usize) -> Hand {
-        Hand { events: Dealer::new(shards), clicks: Dealer::new(shards), suspects: (0..GROUPS).map(|_| Vec::with_capacity(expected_suspects / GROUPS + 16)).collect() }
+    pub fn new(shards: usize) -> Hand {
+        Hand { events: Dealer::new(shards), clicks: Dealer::new(shards) }
     }
 }
 
@@ -253,35 +251,13 @@ impl Deal<'_> {
 
 const AHEAD: usize = 16;
 
-/// Deals the valid events of a run whose event_id cannot have a copy, and lists the others.
-///
-/// # Safety
-/// The run must be live; `deal.lead` must cover every user number.
-pub unsafe fn sweep_events(run: &Run<Ev>, cells: &Cells, deal: &Deal, h: &mut Hand) {
-    for i in 0..run.n {
-        let r = &*run.first.add(i);
-        if i + AHEAD < run.n {
-            let next = &*run.first.add(i + AHEAD);
-            os::soon(cells.word_of(next.tag));
-            if next.who != NOBODY {
-                os::soon(deal.lead.as_ptr().add(next.who as usize));
-            }
-        }
-        if cells.crowded(r.tag) {
-            h.suspects.get_unchecked_mut(group_of(r.tag)).push(Suspect { rec: run.first.add(i), row: run.base.add(r.at as usize), tag: r.tag });
-        } else if r.who != NOBODY {
-            deal.event(r, &mut h.events);
-        }
-    }
-}
-
 /// Deals the clicks of a run. A dealt click is
 /// `[person-in-shard << time_bits | milliseconds after the click window start, campaign | number << 32]`,
 /// where `number` is the click's place in the list of all click records (`first` for the run's
 /// first record).
 ///
 /// # Safety
-/// As `sweep_events`.
+/// The run must be live; `deal.lead` must cover every user number.
 pub unsafe fn sweep_clicks(run: &Run<Ck>, first: u32, deal: &Deal, h: &mut Hand) {
     let bits = deal.seats.local_bits;
     let low = (1u32 << bits) - 1;

@@ -1,11 +1,10 @@
 //! Turns rows into fixed-size records, one input piece at a time.
 //!
 //! Events: every row with an event_id becomes an `Ev`, valid or not, because an invalid copy can
-//! still be the one dedup keeps. Each event_id also marks a 2-bit cell chosen by its hash:
-//! "seen" and "seen more than once". Only events whose cell says "more than once" need the exact
-//! dedup later. The marks are made after reading, not during it: each reader files its events'
-//! hash tags by cell range, then each range is marked by one thread alone, with plain writes to
-//! memory that stays in cache, instead of a locked instruction on a far cache line per row.
+//! still be the one dedup keeps. Each reader files its records by the range of hash cells their
+//! event_id falls in (`EvBins`). After reading, each range is handled by one thread alone, in
+//! memory that stays in cache: its event_ids mark 2-bit cells ("seen", "seen more than once"),
+//! the records whose cell says "more than once" are deduped exactly, and the survivors are dealt.
 //! Clicks: only valid clicks become a `Ck`. Links: both IDs' numbers.
 //!
 //! User IDs become numbers through `Names`. Those lookups touch memory far apart, so each row's lookups are started (address computed, cache line requested) and
@@ -31,14 +30,23 @@ pub struct Ev {
     /// Valid events: milliseconds after the window start, shifted left 24, plus the price of a
     /// valid purchase (0 for views and carts).
     pub key: u64,
-    /// User number, later the person's seat; `NOBODY` when the event is not valid.
+    /// ingest_ts; `i64::MAX` when unreadable.
+    pub ingest: i64,
+    /// Hash of the event_id; the high half is its tag.
+    pub hash: u64,
+    /// First byte of the row.
+    pub row: *const u8,
+    /// User number; `NOBODY` when the event is not valid or lost dedup.
     pub who: u32,
     /// Category rank of a purchase.
     pub cat: u32,
-    /// High half of the event_id hash.
-    pub tag: u32,
-    /// Where the row starts, counted from its run's base.
-    pub at: u32,
+}
+
+impl Ev {
+    #[inline(always)]
+    pub fn tag(&self) -> u32 {
+        (self.hash >> 32) as u32
+    }
 }
 
 /// One valid click.
@@ -53,14 +61,12 @@ pub struct Ck {
     pub id_at: *const u8,
 }
 
-const _: () = assert!(std::mem::size_of::<Ev>() == 24 && std::mem::size_of::<Ck>() == 24);
+const _: () = assert!(std::mem::size_of::<Ev>() == 40 && std::mem::size_of::<Ck>() == 24);
 
 /// A stretch of records written one after another.
 pub struct Run<T> {
     pub first: *mut T,
     pub n: usize,
-    /// Events: the address `Ev::at` counts from.
-    pub base: *const u8,
 }
 
 /// The 2-bit cells for event_id hashes.
@@ -94,68 +100,71 @@ impl Cells {
         let w = unsafe { (*self.word_of(tag)).load(Relaxed) };
         (w >> ((cell & 31) * 2)) & 2 != 0
     }
-    /// Marks the cells of every tag in `lists`. All the tags must be in one range (see
-    /// `range_of`), and no other thread may mark that range at the same time: the words are
-    /// changed with plain reads and writes.
-    pub fn mark_range(&self, lists: &[&[u32]]) {
-        const AHEAD: usize = 16;
-        for tags in lists {
-            for (i, &tag) in tags.iter().enumerate() {
-                if let Some(&next) = tags.get(i + AHEAD) {
-                    os::soon(self.word_of(next));
-                }
-                let sh = ((tag >> self.shift) & 31) * 2;
-                // SAFETY: see `word_of`; this thread alone touches the range.
-                let w = unsafe { &*self.word_of(tag) };
-                let now = w.load(Relaxed);
-                let bit = if (now >> sh) & 1 != 0 { 2u64 } else { 1 };
-                w.store(now | (bit << sh), Relaxed);
-            }
-        }
+    /// Marks the cell of `tag`. No other thread may mark the tag's range meanwhile: the word is
+    /// changed with a plain read and write.
+    #[inline(always)]
+    pub fn mark(&self, tag: u32) {
+        let sh = ((tag >> self.shift) & 31) * 2;
+        // SAFETY: see `word_of`.
+        let w = unsafe { &*self.word_of(tag) };
+        let now = w.load(Relaxed);
+        let bit = if (now >> sh) & 1 != 0 { 2u64 } else { 1 };
+        w.store(now | (bit << sh), Relaxed);
     }
 }
 
 /// Tags are filed into this many ranges of cells; each range is marked by one thread.
 pub const RANGES: usize = 256;
 
-/// One reader's event tags, filed by cell range: a fixed bin per range in one region of memory,
-/// and a list for whatever does not fit.
-pub struct TagBins {
+/// One reader's event records, filed by cell range: a fixed bin per range in one region of
+/// memory, and a list for whatever does not fit.
+pub struct EvBins {
     room: usize,
-    bins: *mut u32,
+    bins: *mut Ev,
     lens: Vec<usize>,
-    spill: Vec<Vec<u32>>,
+    spill: Vec<Vec<Ev>>,
 }
 
-// SAFETY: the region is owned by this value alone, and shared only for reading.
-unsafe impl Send for TagBins {}
-unsafe impl Sync for TagBins {}
+// SAFETY: the region is owned by this value alone; each range is used by one thread at a time.
+unsafe impl Send for EvBins {}
+unsafe impl Sync for EvBins {}
 
-impl TagBins {
+impl EvBins {
     /// Bins for about `rows` events.
-    pub fn new(rows: usize) -> TagBins {
+    pub fn new(rows: usize) -> EvBins {
         let room = (rows / RANGES + rows / RANGES / 8 + 16).next_multiple_of(16);
-        TagBins { room, bins: os::zeroed_array::<u32>(room * RANGES), lens: vec![0; RANGES], spill: (0..RANGES).map(|_| Vec::new()).collect() }
+        EvBins { room, bins: os::zeroed_array::<Ev>(room * RANGES), lens: vec![0; RANGES], spill: (0..RANGES).map(|_| Vec::new()).collect() }
     }
+    /// True when the next record of range `r` would move the range's list.
     #[inline(always)]
-    pub fn push(&mut self, tag: u32) {
-        let r = range_of(tag);
-        // SAFETY: `r` is below RANGES; the bin index is checked against its room.
-        unsafe {
-            let n = self.lens.get_unchecked_mut(r);
-            if *n < self.room {
-                *self.bins.add(r * self.room + *n) = tag;
-                *n += 1;
-            } else {
-                self.spill.get_unchecked_mut(r).push(tag);
-            }
+    fn full(&self, r: usize) -> bool {
+        // SAFETY: `r` is below RANGES.
+        unsafe { *self.lens.get_unchecked(r) >= self.room && { let sp = self.spill.get_unchecked(r); sp.len() == sp.capacity() } }
+    }
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self, r: usize) {
+        let sp = &mut self.spill[r];
+        sp.reserve(sp.len().max(1024));
+    }
+    /// Room for the next record of range `r` (which must not be `full`).
+    #[inline(always)]
+    unsafe fn next(&mut self, r: usize) -> *mut Ev {
+        let n = self.lens.get_unchecked_mut(r);
+        if *n < self.room {
+            let at = self.bins.add(r * self.room + *n);
+            *n += 1;
+            at
+        } else {
+            let sp = self.spill.get_unchecked_mut(r);
+            let k = sp.len();
+            sp.set_len(k + 1);
+            sp.as_mut_ptr().add(k)
         }
     }
-    /// The tags of range `r`, in up to two slices.
-    pub fn range(&self, r: usize) -> [&[u32]; 2] {
-        // SAFETY: the first `lens[r]` items of bin `r` were written.
-        let bin = unsafe { std::slice::from_raw_parts(self.bins.add(r * self.room), self.lens[r]) };
-        [bin, &self.spill[r][..]]
+    /// The records of range `r`, in up to two stretches.
+    pub fn range(&self, r: usize) -> [(*mut Ev, usize); 2] {
+        [(unsafe { self.bins.add(r * self.room) }, self.lens[r]), (self.spill[r].as_ptr() as *mut Ev, self.spill[r].len())]
     }
 }
 
@@ -187,14 +196,11 @@ pub struct Reader {
     wx: Wide,
     dates: Dates,
     supply: Supply,
-    ev_free: *mut Ev,
-    ev_left: usize,
-    pub ev_runs: Vec<Run<Ev>>,
     ck_free: *mut Ck,
     ck_left: usize,
     pub ck_runs: Vec<Run<Ck>>,
-    /// Event hash tags, filed by cell range (`range_of`).
-    pub tags: TagBins,
+    /// Event records, filed by cell range (`range_of`).
+    pub evs: EvBins,
 }
 
 impl Reader {
@@ -205,13 +211,10 @@ impl Reader {
             wx: Wide::new(),
             dates: Dates::new(),
             supply: Supply::new(),
-            ev_free: std::ptr::null_mut(),
-            ev_left: 0,
-            ev_runs: Vec::new(),
             ck_free: std::ptr::null_mut(),
             ck_left: 0,
             ck_runs: Vec::new(),
-            tags: TagBins::new(events),
+            evs: EvBins::new(events),
         }
     }
 }
@@ -309,36 +312,13 @@ struct EventRows<'a, 'b> {
     data: *const u8,
     dates: &'b mut Dates,
     supply: &'b mut Supply,
-    runs: &'b mut Vec<Run<Ev>>,
-    tags: &'b mut TagBins,
-    free: *mut Ev,
-    left: usize,
-    run_first: *mut Ev,
-    /// Offset in `data` that `Ev::at` counts from.
-    run_base: usize,
-}
-
-impl EventRows<'_, '_> {
-    fn end_run(&mut self) {
-        // SAFETY: both pointers are in the same block.
-        let n = unsafe { self.free.offset_from(self.run_first) } as usize;
-        if n > 0 {
-            self.runs.push(Run { first: self.run_first, n, base: unsafe { self.data.add(self.run_base) } });
-        }
-        self.run_first = self.free;
-    }
+    evs: &'b mut EvBins,
 }
 
 impl Rows<6> for EventRows<'_, '_> {
     #[inline(always)]
-    unsafe fn window(&mut self, rows: usize) {
+    unsafe fn window(&mut self, _rows: usize) {
         self.fl.checkpoint(self.supply);
-        if self.left < rows {
-            self.end_run();
-            self.free = os::zeroed_array::<Ev>(BLOCK);
-            self.left = BLOCK;
-            self.run_first = self.free;
-        }
     }
 
     #[inline(always)]
@@ -353,7 +333,7 @@ impl Rows<6> for EventRows<'_, '_> {
             return;
         }
         let sh = self.fl.sh;
-        let tag = (hash_of(d.add(a0), e0 - a0) >> 32) as u32;
+        let hash = hash_of(d.add(a0), e0 - a0);
         let user_len = e1 - a1;
         let (user_key, user_hash) = self.fl.table.begin(d.add(a1), user_len);
 
@@ -377,18 +357,15 @@ impl Rows<6> for EventRows<'_, '_> {
             ok = false;
         }
 
-        let mut at = from - self.run_base;
-        if at > u32::MAX as usize {
-            self.end_run();
-            self.run_base = from;
-            at = 0;
+        let r = range_of((hash >> 32) as u32);
+        if self.evs.full(r) {
+            // Lookups in flight point into the list; finish them before it moves.
+            self.fl.land(self.supply);
+            self.evs.grow(r);
         }
-        let rec = self.free;
-        self.free = rec.add(1);
-        self.left -= 1;
+        let rec = self.evs.next(r);
         let key = if ok { (((ts - sh.win.ws) as u64) << 24) | price as u64 } else { 0 };
-        rec.write(Ev { key, who: NOBODY, cat, tag, at: at as u32 });
-        self.tags.push(tag);
+        rec.write(Ev { key, ingest: if ingest == NEVER { i64::MAX } else { ingest }, hash, row: d.add(from), who: NOBODY, cat });
         let into = if ok { std::ptr::addr_of_mut!((*rec).who) } else { std::ptr::null_mut() };
         if SKIP & 8 != 0 {
             return;
@@ -413,7 +390,7 @@ impl ClickRows<'_, '_> {
         // SAFETY: both pointers are in the same block.
         let n = unsafe { self.free.offset_from(self.run_first) } as usize;
         if n > 0 {
-            self.runs.push(Run { first: self.run_first, n, base: self.data });
+            self.runs.push(Run { first: self.run_first, n });
         }
         self.run_first = self.free;
     }
@@ -535,24 +512,9 @@ unsafe fn read_with<L: Lens, Q: Squeeze>(sh: &Shared, r: &mut Reader, pairs: &mu
     let data = p.data.as_ptr();
     match p.kind {
         Kind::Events => {
-            let mut rows = EventRows {
-                fl: Flight::new(sh),
-                data,
-                dates: &mut r.dates,
-                supply: &mut r.supply,
-                runs: &mut r.ev_runs,
-                tags: &mut r.tags,
-                free: r.ev_free,
-                left: r.ev_left,
-                run_first: r.ev_free,
-                run_base: p.from,
-            };
+            let mut rows = EventRows { fl: Flight::new(sh), data, dates: &mut r.dates, supply: &mut r.supply, evs: &mut r.evs };
             scan::<L, Q, _, 6>(wide, &mut r.ix, &mut r.wx, p, &mut rows);
             rows.fl.close(rows.supply);
-            rows.end_run();
-            let (free, left) = (rows.free, rows.left);
-            r.ev_free = free;
-            r.ev_left = left;
         }
         Kind::Clicks => {
             let mut rows = ClickRows { fl: Flight::new(sh), data, dates: &mut r.dates, supply: &mut r.supply, runs: &mut r.ck_runs, free: r.ck_free, left: r.ck_left, run_first: r.ck_free };

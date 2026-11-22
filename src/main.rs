@@ -2,10 +2,10 @@
 //!
 //! 1. Read: every input piece becomes fixed-size records; user IDs become numbers; links are
 //!    joined into people while events and clicks are still being read.
-//! 2. Sweep: clicks, and events whose event_id cannot have a copy, are dealt next to the other
-//!    rows of their person; the events that may have copies are listed.
-//! 3. Dedup: the listed events are settled exactly, by event_id bytes, and the survivors dealt.
-//! 4. People: per shard, sessions, credit, assists and the output rows; then the Parquet files.
+//! 2. Deal: per range of event_id hash cells (events are filed that way as they are read), the
+//!    cells are marked, the events that may have copies settled exactly, and the survivors
+//!    dealt next to the other rows of their person; then the clicks are dealt.
+//! 3. People: per shard, sessions, credit, assists and the output rows; then the Parquet files.
 
 mod acc;
 mod csv;
@@ -25,15 +25,14 @@ mod ts;
 mod util;
 
 use acc::CampAcc;
-use dedup::{Desk, Suspect, GROUPS};
+use dedup::Desk;
 use ids::Names;
 use input::{list_csv, open_view, plan_slices};
 use parquet::{ColumnView, TextColumn};
-use parse::{Cells, Ck, Ev, Kind, Piece, Reader, Run, Scanner, Shared};
+use parse::{Cells, Ck, Kind, Piece, Reader, Run, Scanner, Shared};
 use people::People;
 use sessions::{Bench, Out, Stage, UserCols};
 use shard::{Deal, Dealt, Hand, Seating};
-use stamp::Dates;
 use std::cell::UnsafeCell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,9 +71,6 @@ impl<T> Each<T> {
     unsafe fn item(&self, i: usize) -> &mut T {
         &mut *self.0[i].get()
     }
-    fn from_vec(items: Vec<T>) -> Each<T> {
-        Each(items.into_iter().map(UnsafeCell::new).collect())
-    }
     fn into_vec(self) -> Vec<T> {
         self.0.into_iter().map(|c| c.into_inner()).collect()
     }
@@ -87,8 +83,6 @@ unsafe impl<T> Send for Shareable<T> {}
 
 unsafe impl<T> Send for Run<T> {}
 unsafe impl<T> Sync for Run<T> {}
-unsafe impl Send for Suspect {}
-unsafe impl Sync for Suspect {}
 
 fn env_path(name: &str, default: &str) -> PathBuf {
     PathBuf::from(std::env::var(name).unwrap_or_else(|_| default.to_string()))
@@ -247,13 +241,11 @@ fn run() -> Result<(), String> {
     let mut people = joined.into_inner().unwrap().expect("links joined");
     let ids = names.count();
     people.cover(ids);
-    let mut ev_runs: Vec<Run<Ev>> = Vec::new();
     let mut ck_runs: Vec<(Run<Ck>, u32)> = Vec::new();
     let mut ck_total = 0u64;
-    let mut tag_lists: Vec<parse::TagBins> = Vec::with_capacity(threads);
+    let mut ev_bins: Vec<parse::EvBins> = Vec::with_capacity(threads);
     for r in readers.into_vec() {
-        tag_lists.push(r.tags);
-        ev_runs.extend(r.ev_runs);
+        ev_bins.push(r.evs);
         for run in r.ck_runs {
             let n = run.n as u64;
             ck_runs.push((run, ck_total as u32));
@@ -263,87 +255,48 @@ fn run() -> Result<(), String> {
     if ck_total > u32::MAX as u64 {
         return Err("more than four billion clicks".to_string());
     }
-    let ev_total: usize = ev_runs.iter().map(|r| r.n).sum();
+    let ev_total: usize = (0..parse::RANGES).map(|k| ev_bins.iter().map(|b| b.range(k).iter().map(|p| p.1).sum::<usize>()).sum::<usize>()).sum();
     lg!(t0, "read", "read: {} event rows, {} clicks, {} user ids", ev_total, ck_total, ids);
     if parse::SKIP != 0 {
         eprintln!("stages{}", t0.short);
         return Ok(());
     }
 
-    // Mark the event cells, one range of cells per worker at a time.
-    let next = AtomicUsize::new(0);
-    par(threads, |_| loop {
-        let k = next.fetch_add(1, Ordering::Relaxed);
-        if k >= parse::RANGES {
-            break;
-        }
-        let lists: Vec<&[u32]> = tag_lists.iter().flat_map(|t| t.range(k)).collect();
-        sh.cells.mark_range(&lists);
-    });
-    // Kept until the process ends: giving it back costs more than it saves.
-    std::mem::forget(tag_lists);
-    lg!(t0, "mark", "marked event cells");
-
-    // ---- 2. Sweep: deal the rows that need no dedup, list the suspects ----
+    // ---- 2. Deal: events range by range (mark, dedup, deal), then clicks ----
     let seats = Seating::new(ids, ev_total);
     let shards = seats.shards;
     let deal = Deal { seats: &seats, lead: &people.lead, event_time_bits: shard::bits_for(sh.win.we - sh.win.ws), click_time_bits: shard::bits_for(sh.win.we - sh.win.cws) };
-    let hands: Each<Hand> = Each::new(threads, || Hand::new(shards, ev_total / 4 / threads));
+    let hands: Each<Hand> = Each::new(threads, || Hand::new(shards));
     let next = AtomicUsize::new(0);
-    par(threads, |w| {
-        // SAFETY: worker `w` owns hand `w`; each run is claimed by one worker.
+    let suspects: usize = par(threads, |w| {
+        // SAFETY: worker `w` owns hand `w`; each range and each click run is claimed by one worker.
         let h = unsafe { hands.item(w) };
+        let mut desk = Desk::default();
+        let mut seen = 0usize;
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
-            if i < ev_runs.len() {
-                unsafe { shard::sweep_events(&ev_runs[i], &sh.cells, &deal, h) };
-            } else if i < ev_runs.len() + ck_runs.len() {
-                let (run, first) = &ck_runs[i - ev_runs.len()];
+            if i < parse::RANGES {
+                let parts: Vec<(*mut parse::Ev, usize)> = ev_bins.iter().flat_map(|b| b.range(i)).collect();
+                seen += unsafe { dedup::range(&parts, &sh.cells, &mut desk, &deal, &mut h.events) };
+            } else if i < parse::RANGES + ck_runs.len() {
+                let (run, first) = &ck_runs[i - parse::RANGES];
                 unsafe { shard::sweep_clicks(run, *first, &deal, h) };
             } else {
                 break;
             }
         }
+        h.events.finish();
         h.clicks.finish();
-    });
-    lg!(t0, "sweep", "swept: {} shards", shards);
-    let mut hands = hands.into_vec();
-    let suspect_lists: Vec<Vec<Vec<Suspect>>> = hands.iter_mut().map(|h| std::mem::take(&mut h.suspects)).collect();
-    let hands = Each::from_vec(hands);
-
-    // ---- 3. Dedup: settle the suspects, deal the survivors ----
-    let next = AtomicUsize::new(0);
-    let suspects: usize = par(threads, |w| {
-        // SAFETY: worker `w` owns hand `w`.
-        let events = unsafe { &mut hands.item(w).events };
-        let mut desk = Desk::default();
-        let mut dates = Dates::new();
-        let mut seen = 0usize;
-        loop {
-            let g = next.fetch_add(1, Ordering::Relaxed);
-            if g >= GROUPS {
-                break;
-            }
-            let lists: Vec<&[Suspect]> = suspect_lists.iter().map(|l| &l[g][..]).collect();
-            seen += lists.iter().map(|l| l.len()).sum::<usize>();
-            // SAFETY: suspects point at live records and rows; survivors are valid when `who` is set.
-            unsafe {
-                dedup::settle(&lists, &mut desk, &mut dates, |rec| {
-                    if (*rec).who != parse::NOBODY {
-                        deal.event(&*rec, events);
-                    }
-                })
-            };
-        }
-        events.finish();
         seen
     })
     .into_iter()
     .sum();
+    // Kept until the process ends: giving it back costs more than it saves.
+    std::mem::forget(ev_bins);
     let hands = hands.into_vec();
     let events = Dealt::new(&hands.iter().map(|h| &h.events.blocks[..]).collect::<Vec<_>>(), shards);
     let clicks = Dealt::new(&hands.iter().map(|h| &h.clicks.blocks[..]).collect::<Vec<_>>(), shards);
-    lg!(t0, "dedup", "deduped: {} suspects", suspects);
+    lg!(t0, "deal", "dealt: {} shards, {} suspects", shards, suspects);
 
     // ---- 4. People ----
     let stage = Stage {

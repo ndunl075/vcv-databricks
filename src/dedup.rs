@@ -1,173 +1,176 @@
-//! Exact dedup on event_id for the events that may have copies.
+//! One range of hash cells at a time: mark the cells, dedup exactly, deal the survivors.
 //!
-//! A suspect is an event whose hash cell was marked by more than one row. Suspects are grouped
-//! by the event_id itself (bytes, never a hash alone); in each group the copy with the smallest
-//! ingest_ts stays. An invalid copy takes part like any other, so it can be the one that stays,
-//! which drops the event.
+//! A suspect is an event whose hash cell was marked by more than one row. Copies of one event
+//! share their hash, and all of them are suspects. Suspects are matched by the full 64-bit hash,
+//! and every match is confirmed on the event_id bytes (never a hash alone). In each set of copies
+//! the one with the smallest ingest_ts stays (the first one seen on a tie); the others lose
+//! their user number. An invalid copy takes part like any other, so it can be the one that
+//! stays, which drops the event.
 
-use crate::ids::{is_long, key_of, spread, Key};
 use crate::os;
-use crate::parse::Ev;
-use crate::stamp::{Dates, NEVER};
+use crate::parse::{Cells, Ev, NOBODY};
+use crate::shard::{Deal, Dealer};
 
-#[derive(Clone, Copy)]
-pub struct Suspect {
-    pub rec: *mut Ev,
-    /// First byte of the event's row.
-    pub row: *const u8,
-    /// The record's hash tag.
-    pub tag: u32,
+/// Scratch space for `range`.
+#[derive(Default)]
+pub struct Desk {
+    found: Vec<*mut Ev>,
+    /// Open addressing over `found`: index + 1, 0 = free.
+    slots: Vec<u32>,
+    /// (first copy, later copy) for every hash seen again, in the order seen.
+    pairs: Vec<(u32, u32)>,
 }
 
-/// Suspects are dealt into this many groups by hash, so groups can be settled side by side.
-pub const GROUPS: usize = 256;
+// SAFETY: the pointers are only scratch between calls.
+unsafe impl Send for Desk {}
 
+/// Value of the field starting at `p` in a well-formed row.
 #[inline(always)]
-pub fn group_of(tag: u32) -> usize {
-    (tag >> 24) as usize
-}
-
-/// Value of the field starting at `p` in a well-formed row, and where the next field starts.
-#[inline(always)]
-unsafe fn field(p: *const u8) -> (*const u8, usize, *const u8) {
+unsafe fn field(p: *const u8) -> (*const u8, usize) {
     let (start, close) = if *p == b'"' { (p.add(1), b'"') } else { (p, b',') };
     let mut n = 0usize;
     while *start.add(n) != close {
         n += 1;
     }
-    (start, n, start.add(n + 1 + (close == b'"') as usize))
-}
-
-/// The event_id and ingest_ts of the event row at `row`.
-#[inline(always)]
-unsafe fn id_and_ingest(row: *const u8, dates: &mut Dates) -> (*const u8, usize, i64) {
-    let (id, id_len, user) = field(row);
-    let (_, _, ts) = field(user);
-    let (_, _, ingest) = field(ts);
-    let (at, n, _) = field(ingest);
-    let t = dates.instant(at, n);
-    // An unreadable ingest_ts sorts last (the event is invalid either way).
-    (id, id_len, if t == NEVER { i64::MAX } else { t })
-}
-
-#[derive(Clone, Copy)]
-struct Kept {
-    key: Key,
-    ingest: i64,
-    rec: *mut Ev,
-    row: *const u8,
-}
-
-const FREE: Kept = Kept { key: [0; 3], ingest: 0, rec: std::ptr::null_mut(), row: std::ptr::null() };
-
-/// Scratch space for `settle`.
-#[derive(Default)]
-pub struct Desk {
-    /// Tag counts: tag in the low half, how many suspects carry it in the high half; 0 = free.
-    tags: Vec<u64>,
-    /// Suspects whose tag occurs more than once.
-    again: Vec<Suspect>,
-    kept: Vec<Kept>,
+    (start, n)
 }
 
 #[inline(always)]
-fn tag_slot(tag: u32, bits: u32) -> usize {
-    (tag.wrapping_mul(0x9e37_79b1) >> (32 - bits)) as usize
+unsafe fn same_id(a: *const u8, b: *const u8) -> bool {
+    let (x, xn) = field(a);
+    let (y, yn) = field(b);
+    std::slice::from_raw_parts(x, xn) == std::slice::from_raw_parts(y, yn)
 }
 
-/// Settles one group: calls `keep` once for the surviving copy of every event in it.
-///
-/// Copies of one event share their hash, hence their tag, and all of them are suspects. So a
-/// suspect whose tag no other suspect carries has no copy and is kept without a look at its
-/// row; only the others are compared by their event_id bytes.
+const AHEAD: usize = 16;
+
+/// Handles one range of cells, whose records are the stretches in `parts`: marks the cells,
+/// settles the copies, deals the valid survivors into `events`. Returns how many suspects it saw.
 ///
 /// # Safety
-/// Every suspect must point at a live record and at the start of the row it was read from.
-pub unsafe fn settle(lists: &[&[Suspect]], desk: &mut Desk, dates: &mut Dates, mut keep: impl FnMut(*mut Ev)) {
-    let total: usize = lists.iter().map(|l| l.len()).sum();
-    if total < 2 {
-        lists.iter().flat_map(|l| l.iter()).for_each(|s| keep(s.rec));
-        return;
-    }
-    let bits = (total * 2).next_power_of_two().trailing_zeros().max(4);
-    let mask = (1usize << bits) - 1;
-    desk.tags.clear();
-    desk.tags.resize(1 << bits, 0);
-    for s in lists.iter().flat_map(|l| l.iter()) {
-        let mut j = tag_slot(s.tag, bits);
-        loop {
-            let t = desk.tags.get_unchecked_mut(j);
-            if *t == 0 {
-                *t = (1 << 32) | s.tag as u64;
-                break;
+/// The stretches must hold live records of this range only, used by no other thread meanwhile;
+/// `deal.lead` must cover every user number.
+pub unsafe fn range(parts: &[(*mut Ev, usize)], cells: &Cells, desk: &mut Desk, deal: &Deal, events: &mut Dealer) -> usize {
+    for &(first, n) in parts {
+        for i in 0..n {
+            if i + AHEAD < n {
+                os::soon(cells.word_of((*first.add(i + AHEAD)).tag()));
             }
-            if *t as u32 == s.tag {
-                *t += 1 << 32;
-                break;
-            }
-            j = (j + 1) & mask;
+            cells.mark((*first.add(i)).tag());
         }
     }
-    desk.again.clear();
-    for list in lists {
-        for (i, s) in list.iter().enumerate() {
-            if let Some(ahead) = list.get(i + 8) {
-                os::soon(ahead.rec);
-            }
-            let mut j = tag_slot(s.tag, bits);
-            // Every tag was counted above, so its slot is found before a free one.
-            while *desk.tags.get_unchecked(j) as u32 != s.tag {
-                j = (j + 1) & mask;
-            }
-            if *desk.tags.get_unchecked(j) >> 32 == 1 {
-                keep(s.rec);
-            } else {
-                desk.again.push(*s);
+    let found = &mut desk.found;
+    found.clear();
+    for &(first, n) in parts {
+        for i in 0..n {
+            let r = first.add(i);
+            if cells.crowded((*r).tag()) {
+                found.push(r);
             }
         }
     }
-    if desk.again.is_empty() {
-        return;
+    let suspects = found.len();
+    if suspects >= 2 {
+        settle(desk);
     }
-    let cap = (desk.again.len() * 2).next_power_of_two();
-    let mask = cap - 1;
-    let table = &mut desk.kept;
-    table.clear();
-    table.resize(cap, FREE);
-    for (i, s) in desk.again.iter().enumerate() {
-        if let Some(ahead) = desk.again.get(i + 8) {
-            os::soon(ahead.row);
-        }
-        let (id, id_len, ingest) = id_and_ingest(s.row, dates);
-        let key = key_of(id, id_len);
-        let mut j = (spread(&key) as usize) & mask;
-        loop {
-            let k = table.get_unchecked_mut(j);
-            if k.rec.is_null() {
-                *k = Kept { key, ingest, rec: s.rec, row: s.row };
-                break;
-            }
-            if k.key == key && (!is_long(&key) || same_id(k.row, id, id_len)) {
-                if ingest < k.ingest {
-                    k.ingest = ingest;
-                    k.rec = s.rec;
-                    k.row = s.row;
+    for &(first, n) in parts {
+        for i in 0..n {
+            if i + AHEAD < n {
+                let w = (*first.add(i + AHEAD)).who;
+                if w != NOBODY {
+                    os::soon(deal.lead.as_ptr().add(w as usize));
                 }
+            }
+            let r = &*first.add(i);
+            if r.who != NOBODY {
+                deal.event(r, events);
+            }
+        }
+    }
+    suspects
+}
+
+unsafe fn settle(desk: &mut Desk) {
+    let found = &mut desk.found;
+    let n = found.len();
+    let cap = (n * 2).next_power_of_two();
+    let mask = cap - 1;
+    desk.slots.clear();
+    desk.slots.resize(cap, 0);
+    desk.pairs.clear();
+    for i in 0..n {
+        let h = (**found.get_unchecked(i)).hash;
+        let mut j = (h as usize) & mask;
+        loop {
+            let t = *desk.slots.get_unchecked(j);
+            if t == 0 {
+                *desk.slots.get_unchecked_mut(j) = i as u32 + 1;
+                break;
+            }
+            if (**found.get_unchecked(t as usize - 1)).hash == h {
+                desk.pairs.push((t - 1, i as u32));
                 break;
             }
             j = (j + 1) & mask;
         }
     }
-    for k in table.iter() {
-        if !k.rec.is_null() {
-            keep(k.rec);
+    if desk.pairs.is_empty() {
+        return;
+    }
+    // Confirm every match on the bytes; the rows are far apart, so ask for them ahead.
+    let pairs = &desk.pairs;
+    let mut all_same = true;
+    for (k, &(a, b)) in pairs.iter().enumerate() {
+        if let Some(&(x, y)) = pairs.get(k + 8) {
+            os::soon((**found.get_unchecked(x as usize)).row);
+            os::soon((**found.get_unchecked(y as usize)).row);
+        }
+        all_same &= same_id((**found.get_unchecked(a as usize)).row, (**found.get_unchecked(b as usize)).row);
+    }
+    if !all_same {
+        exact(found);
+        return;
+    }
+    for &(a, b) in pairs {
+        let c = *found.get_unchecked(b as usize);
+        let w = found.get_unchecked_mut(a as usize);
+        if (*c).ingest < (**w).ingest {
+            (**w).who = NOBODY;
+            *w = c;
+        } else {
+            (*c).who = NOBODY;
         }
     }
 }
 
+/// The same, for the rare range where two different event_ids share a 64-bit hash.
 #[cold]
 #[inline(never)]
-unsafe fn same_id(row: *const u8, id: *const u8, id_len: usize) -> bool {
-    let (other, other_len, _) = field(row);
-    std::slice::from_raw_parts(other, other_len) == std::slice::from_raw_parts(id, id_len)
+unsafe fn exact(found: &[*mut Ev]) {
+    let mut order: Vec<u32> = (0..found.len() as u32).collect();
+    order.sort_by_key(|&i| ((*found[i as usize]).hash, i));
+    let mut i = 0;
+    while i < order.len() {
+        let mut j = i + 1;
+        while j < order.len() && (*found[order[j] as usize]).hash == (*found[order[i] as usize]).hash {
+            j += 1;
+        }
+        // One hash, in the order seen: split by event_id, keep the first smallest ingest of each.
+        let mut winners: Vec<*mut Ev> = Vec::new();
+        for &k in &order[i..j] {
+            let c = found[k as usize];
+            match winners.iter_mut().find(|w| same_id((***w).row, (*c).row)) {
+                Some(w) => {
+                    if (*c).ingest < (**w).ingest {
+                        (**w).who = NOBODY;
+                        *w = c;
+                    } else {
+                        (*c).who = NOBODY;
+                    }
+                }
+                None => winners.push(c),
+            }
+        }
+        i = j;
+    }
 }
