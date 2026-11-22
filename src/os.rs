@@ -14,6 +14,8 @@ mod sys {
         pub fn advise(start: *mut c_void, bytes: usize, what: i32) -> i32;
         #[link_name = "_exit"]
         pub fn leave(code: i32) -> !;
+        #[link_name = "getrusage"]
+        pub fn usage(who: i32, out: *mut [i64; 18]) -> i32;
     }
     pub const CAN_READ: i32 = 1;
     pub const CAN_WRITE: i32 = 2;
@@ -88,6 +90,17 @@ pub fn release(start: *const u8, bytes: usize) {
             sys::advise(start as *mut c_void, bytes, sys::DROP_PAGES);
         }
     }
+}
+
+/// Processor seconds this process has used so far: (in user code, in the kernel).
+pub fn cpu_seconds() -> (f64, f64) {
+    let mut raw = [0i64; 18];
+    // SAFETY: the buffer is as large as the system's record (two time values and 14 counters).
+    unsafe {
+        sys::usage(0, &mut raw);
+    }
+    let secs = |s: i64, micros: i64| s as f64 + (micros as i32) as f64 / 1e6;
+    (secs(raw[0], raw[1]), secs(raw[2], raw[3]))
 }
 
 /// Ends the process at once: no destructors, no unwinding, no flushing.

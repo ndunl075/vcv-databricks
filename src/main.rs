@@ -95,7 +95,10 @@ fn env_path(name: &str, default: &str) -> PathBuf {
 
 macro_rules! lg {
     ($t0:expr, $($arg:tt)*) => {
-        eprintln!("[{:7.3}s] {}", $t0.elapsed().as_secs_f64(), format!($($arg)*))
+{
+            let (user, kernel) = os::cpu_seconds();
+            eprintln!("[{:7.3}s cpu {:6.3}+{:5.3}] {}", $t0.elapsed().as_secs_f64(), user, kernel, format!($($arg)*))
+        }
     };
 }
 
