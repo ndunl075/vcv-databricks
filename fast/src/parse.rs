@@ -3,7 +3,7 @@
 //! (and slowly) later. Rules are those of rules.md; see src/parse.rs of the general pipeline
 //! for the same checks on hashed keys.
 
-use crate::csv::{for_each_line, split};
+use crate::csv::for_each_row;
 use crate::fx::*;
 use crate::handoff::give_up;
 use crate::idc::{code_of, number};
@@ -122,20 +122,18 @@ fn write_slot(r: &EvRec, ingw: u32, ts: u32, v: u32, pc: u32) {
 
 pub fn parse_events(fx: &Fx, tl: &mut Tl, data: &'static [u8], s: usize, e: usize) {
     let (ws, we) = (fx.win.ws, fx.win.we);
-    for_each_line(data, s, e, |line| {
-        let mut f = [(0usize, 0usize); 7];
-        if !split::<7>(line, &mut f) {
-            return;
-        }
-        let eid = &line[f[0].0..f[0].1];
+    let mut batch = [Pending { n: 0, ingw: 0, ts: 0, v: 0, pc: 0 }; BATCH];
+    let mut nb = 0usize;
+    for_each_row::<7>(data, s, e, |f| {
+        let eid = &data[f[0].0..f[0].1];
         if eid.is_empty() {
             return;
         }
-        let user = &line[f[1].0..f[1].1];
-        let ts = parse_ts(&line[f[2].0..f[2].1]);
-        let ing = parse_ts(&line[f[3].0..f[3].1]);
-        let ty = &line[f[4].0..f[4].1];
-        let prod = &line[f[5].0..f[5].1];
+        let user = &data[f[1].0..f[1].1];
+        let ts = parse_ts(&data[f[2].0..f[2].1]);
+        let ing = parse_ts(&data[f[3].0..f[3].1]);
+        let ty = &data[f[4].0..f[4].1];
+        let prod = &data[f[5].0..f[5].1];
 
         let mut ok = !user.is_empty() && !prod.is_empty();
         let ts_v = match ts {
@@ -156,7 +154,7 @@ pub fn parse_events(fx: &Fx, tl: &mut Tl, data: &'static [u8], s: usize, e: usiz
         let mut cat = 0u32;
         match ty {
             b"view" | b"cart" => {}
-            b"purchase" => match parse_price(&line[f[6].0..f[6].1]) {
+            b"purchase" => match parse_price(&data[f[6].0..f[6].1]) {
                 Some(p) => {
                     price = p;
                     cat = match fx.prods.map.get(prod) {
@@ -208,28 +206,58 @@ pub fn parse_events(fx: &Fx, tl: &mut Tl, data: &'static [u8], s: usize, e: usiz
         if n >= tl.nmax_ev {
             tl.nmax_ev = n + 1;
         }
-        write_slot(&fx.ev[n], ingw, tsr, v, pc);
+        // Slot writes use a locked instruction, which waits for the cache line: prefetch now,
+        // write a batch later.
+        prefetch(&fx.ev[n]);
+        batch[nb] = Pending { n: n as u32, ingw, ts: tsr, v, pc };
+        nb += 1;
+        if nb == BATCH {
+            for p in &batch {
+                write_slot(&fx.ev[p.n as usize], p.ingw, p.ts, p.v, p.pc);
+            }
+            nb = 0;
+        }
     });
+    for p in &batch[..nb] {
+        write_slot(&fx.ev[p.n as usize], p.ingw, p.ts, p.v, p.pc);
+    }
     flush_counts(fx, tl);
+}
+
+const BATCH: usize = 16;
+
+#[derive(Clone, Copy)]
+struct Pending {
+    n: u32,
+    ingw: u32,
+    ts: u32,
+    v: u32,
+    pc: u32,
+}
+
+#[inline(always)]
+fn prefetch<T>(p: &T) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(p as *const T as *const i8, std::arch::x86_64::_MM_HINT_T0);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = p;
 }
 
 pub fn parse_clicks(fx: &Fx, tl: &mut Tl, data: &'static [u8], s: usize, e: usize) {
     let (cws, we) = (fx.win.cws, fx.win.we);
-    for_each_line(data, s, e, |line| {
-        let mut f = [(0usize, 0usize); 4];
-        if !split::<4>(line, &mut f) {
-            return;
-        }
-        let cid = &line[f[0].0..f[0].1];
-        let user = &line[f[1].0..f[1].1];
+    for_each_row::<4>(data, s, e, |f| {
+        let cid = &data[f[0].0..f[0].1];
+        let user = &data[f[1].0..f[1].1];
         if cid.is_empty() || user.is_empty() {
             return;
         }
-        let ts = match parse_ts(&line[f[3].0..f[3].1]) {
+        let ts = match parse_ts(&data[f[3].0..f[3].1]) {
             Some(t) if t >= cws && t < we => t,
             _ => return,
         };
-        let camp = match fx.ctab.lookup(&line[f[2].0..f[2].1]) {
+        let camp = match fx.ctab.lookup(&data[f[2].0..f[2].1]) {
             Some(c) => c,
             None => return,
         };
@@ -256,13 +284,9 @@ pub fn parse_clicks(fx: &Fx, tl: &mut Tl, data: &'static [u8], s: usize, e: usiz
 }
 
 pub fn parse_links(fx: &Fx, tl: &mut Tl, data: &'static [u8], s: usize, e: usize) {
-    for_each_line(data, s, e, |line| {
-        let mut f = [(0usize, 0usize); 2];
-        if !split::<2>(line, &mut f) {
-            return;
-        }
-        let a = &line[f[0].0..f[0].1];
-        let b = &line[f[1].0..f[1].1];
+    for_each_row::<2>(data, s, e, |f| {
+        let a = &data[f[0].0..f[0].1];
+        let b = &data[f[1].0..f[1].1];
         if a.is_empty() || b.is_empty() {
             return;
         }
