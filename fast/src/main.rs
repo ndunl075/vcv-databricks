@@ -59,6 +59,23 @@ fn par<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     })
 }
 
+/// Test hook: `SSF_TEST=<point>[:<kind>]` makes the run fail at a named point, to prove the
+/// hand-off cleans up from every stage. Kinds: fail (default), panic, segv, ill.
+fn hook(point: &str) {
+    if let Ok(v) = std::env::var("SSF_TEST") {
+        let (p, k) = v.split_once(':').unwrap_or((v.as_str(), "fail"));
+        if p == point {
+            match k {
+                "panic" => panic!("test panic at {point}"),
+                "segv" => unsafe { std::ptr::write_volatile(std::ptr::null_mut::<u8>(), 1) },
+                #[cfg(target_arch = "x86_64")]
+                "ill" => unsafe { std::arch::asm!("ud2") },
+                _ => give_up(&format!("test failure at {point}")),
+            }
+        }
+    }
+}
+
 fn ceil_log2(x: u64) -> u32 {
     64 - x.saturating_sub(1).leading_zeros()
 }
@@ -179,6 +196,7 @@ fn run() -> Result<(), String> {
         }
     }
     lg!(t0, "keys found (ev bits {ev_bits}, ck cap {ck_cap})");
+    hook("keys");
 
     // ---- Arrays. ----
     let ev_cap = 1usize << ev_bits;
@@ -260,6 +278,7 @@ fn run() -> Result<(), String> {
         }
         tl
     });
+    hook("parsed");
     let nmax_ev = tls.iter().map(|t| t.nmax_ev).max().unwrap_or(0);
     let nmax_ck = tls.iter().map(|t| t.nmax_ck).max().unwrap_or(0);
     lg!(t0, "parsed: {} event slots, {} click slots, extras {}/{}/{}", nmax_ev, nmax_ck, fx.ex_ev.load(Relaxed), fx.ex_ck.load(Relaxed), fx.ex_lk.load(Relaxed));
@@ -354,6 +373,7 @@ fn run() -> Result<(), String> {
         return Err(format!("too many users on the slow path ({} of {} runs)", slow_users.len(), nruns));
     }
 
+    hook("runs");
     // ---- The people of the slow path. ----
     let extra_ids: Vec<&'static [u8]> = ex_evs.iter().map(|e| e.user).chain(ex_cks.iter().map(|c| c.user)).collect();
     let comps = slow::build(fx, &tls, &slow_users, &extra_ids);
@@ -480,6 +500,7 @@ fn run() -> Result<(), String> {
         out.flush();
         (out.acc, out.rows)
     });
+    hook("written");
     let total_rows: u64 = results.iter().map(|r| r.1).sum();
     lg!(t0, "users done: {} rows, {} slow events", total_rows, slow_events.load(Relaxed));
     if slow_events.load(Relaxed) > 1_000_000 + nruns * 4 {
@@ -527,6 +548,7 @@ fn run() -> Result<(), String> {
     )
     .map_err(io)?;
     lg!(t0, "done");
+    hook("end");
     Ok(())
 }
 
